@@ -1,0 +1,4 @@
+/.worktrees/
+/bin/
+/dist/
+/coverage.out
