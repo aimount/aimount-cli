@@ -40,7 +40,7 @@ func TestCommandsPlanApplyNoAutoRetryAndState(t *testing.T) {
 			w.WriteHeader(503)
 			w.Write([]byte(`{"error":{"code":"service_unavailable"}}`))
 		case strings.HasSuffix(r.URL.Path, "/stack"):
-			w.Write([]byte(`{"version":1,"models":[],"tools":[],"agents":[]}`))
+			w.Write([]byte(`{"version":1,"models":[],"tools":[],"agents":[],"applications":[]}`))
 		default:
 			w.WriteHeader(404)
 		}
@@ -192,6 +192,7 @@ func TestActualPullPreservesLocatorsThroughAliasAndDetectsChangedBindings(t *tes
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	g := emptyGraph()
 	schema := object{"type": "object", "additionalProperties": false}
+	g.Applications = []object{{"name": "product", "spec": object{"display_name": "Product", "agents": []any{}}}}
 	g.Tools = []object{{"name": "lookup", "archived": true, "spec": object{"display_name": "Lookup", "enabled": true, "current_contract": "v1", "contracts": []any{object{"name": "v1", "description": "Lookup", "type": "server_webhook", "input_schema": schema, "output_schema": object{}, "webhook": object{"url_source": "env", "auth": "bearer_token", "timeout_seconds": 10}}}}}}
 	local := emptyGraph()
 	local.Tools = []object{maps.Clone(g.Tools[0])}
@@ -249,6 +250,9 @@ func TestActualPullPreservesLocatorsThroughAliasAndDetectsChangedBindings(t *tes
 			i, e := inspect(root)
 			if e != nil || i.Locators["tool/lookup/v1/url"] != "MY_URL" || i.Locators["tool/lookup/v1/key"] != "MY_TOKEN" {
 				t.Fatal(i, e)
+			}
+			if _, e := os.Stat(filepath.Join(root, "applications/product.yaml")); e != nil {
+				t.Fatal("Application not published with preserved locators", e)
 			}
 		}
 		b, e := os.ReadFile(filepath.Join(root, "unknown.txt"))
@@ -355,5 +359,151 @@ func TestActualPullPreservesSchemaScalarMeaning(t *testing.T) {
 	actual := objects(obj(loaded.Tools[0]["spec"])["contracts"])[0]["output_schema"]
 	if wire(actual) != wire(schema) {
 		t.Fatal("actual pull changed schema scalar meaning")
+	}
+}
+
+func TestApplicationCompleteReferencesAliasesAndLifecycle(t *testing.T) {
+	current := emptyGraph()
+	current.Agents = []object{{"name": "main"}}
+	bindings := []object{{"kind": "agent", "name": "main", "id": "agt_0123456789ABCDEF"}, {"kind": "agent", "name": "old_main", "id": "agt_0123456789ABCDEF"}}
+	for _, tc := range []struct {
+		name                                     string
+		refs                                     []any
+		local, agentArchived, appArchived, valid bool
+	}{
+		{"empty", []any{}, false, false, false, true},
+		{"server dependency is not local", []any{object{"name": "main"}}, false, false, false, false},
+		{"portable alias", []any{object{"name": "old_main"}}, true, false, false, true},
+		{"duplicate stable Agent", []any{object{"name": "main"}, object{"name": "old_main"}}, true, false, false, false},
+		{"active uses archived", []any{object{"name": "main"}}, true, true, false, false},
+		{"archived retains archived", []any{object{"name": "main"}}, true, true, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeFiles(t, root, map[string]string{"applications/product.yaml": applicationYAML})
+			g, err := load(root, nil, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			a := g.group("application")[0]
+			a["archived"] = tc.appArchived
+			obj(a["spec"])["agents"] = tc.refs
+			if tc.local {
+				g.Agents = []object{{"name": "main", "archived": tc.agentArchived, "spec": object{"models": []any{}, "tools": []any{}}}}
+			}
+			err = prepareGraph(g, current, bindings)
+			if (err == nil) != tc.valid {
+				t.Fatal("wrong complete Application validation", err)
+			}
+		})
+	}
+}
+
+func TestApplicationSemanticSetsAndAccurateErasureScope(t *testing.T) {
+	plan := object{"changes": []any{
+		object{"kind": "application", "name": "product", "operation": "DELETE", "runtime_cascade": true},
+		object{"kind": "agent", "name": "old", "operation": "DELETE", "erasure_scope": []any{"private_tests", "private_files", "configuration"}},
+		object{"kind": "application", "name": "other", "operation": "UPDATE", "before": object{"agents": []any{object{"name": "z"}, object{"name": "b"}}}, "after": object{"agents": []any{object{"name": "d"}, object{"name": "a"}}}},
+	}}
+	out := semantic(plan)
+	for _, want := range []string{`agents: +["a","d"] -["b","z"]`, "IRREVERSIBLE Application-owned Users/conversations/Files", "IRREVERSIBLE Agent-owned private-test/files/configuration", "ordinary conversation history preserved", "physical cleanup asynchronous", "detach alone preserves accepted work and ordinary history"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %s in %s", want, out)
+		}
+	}
+	if strings.Index(out, "DELETE agent") > strings.Index(out, "UPDATE application") || strings.Contains(out, "default") {
+		t.Fatal("wrong semantic order or inferred responder", out)
+	}
+	if got := differences([]any{object{"name": "z"}, object{"name": "a"}}, []any{object{"name": "a"}, object{"name": "z"}}, "agents"); len(got) != 0 {
+		t.Fatal("set reorder is not a semantic change", got)
+	}
+}
+
+func TestApplicationReadSetRejectsChangedOrIncompleteIdentities(t *testing.T) {
+	g := emptyGraph()
+	g.Applications = []object{{"name": "product"}}
+	binding := object{"kind": "application", "name": "product", "id": "app_0123456789ABCDEF"}
+	for _, tc := range []struct {
+		name                string
+		bindings, resources []any
+		valid               bool
+	}{
+		{"complete", []any{binding}, []any{object{"kind": "application", "id": binding["id"], "etag": "opaque"}}, true},
+		{"unprotected application", []any{binding}, []any{}, false},
+		{"missing binding", []any{}, []any{object{"kind": "application", "id": binding["id"], "etag": "opaque"}}, false},
+		{"recreated name", []any{object{"kind": "application", "name": "product", "id": "app_0000000000000001"}}, []any{object{"kind": "application", "id": "app_0000000000000001", "etag": "opaque"}}, false},
+		{"extra saved application", []any{binding, object{"kind": "application", "name": "new", "id": "app_0000000000000001"}}, []any{}, false},
+		{"duplicate binding", []any{binding, binding}, []any{}, false},
+		{"duplicate resource", []any{binding}, []any{object{"kind": "application", "id": binding["id"], "etag": "opaque"}, object{"kind": "application", "id": binding["id"], "etag": "opaque"}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkApplicationReadSet(g, []object{binding}, object{"bindings": tc.bindings, "resources": tc.resources})
+			if (err == nil) != tc.valid {
+				t.Fatal("incorrect Application read-set protection", err)
+			}
+		})
+	}
+}
+
+func TestApplicationWholeProjectPruneReadSetAndEmptyGuards(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	for _, tc := range []struct {
+		name, definition, want string
+		prune, completeReadSet bool
+		plans, writes          int
+	}{
+		{"empty prune is not delete all", "", "no resource definitions", true, true, 0, 0},
+		{"omitted application", modelYAML, "application saved", false, true, 0, 0},
+		{"prune allows omission", modelYAML, "", true, true, 1, 1},
+		{"missing application read-set", applicationYAML, "Application read-set", false, false, 1, 0},
+		{"complete application read-set", applicationYAML, "", false, true, 1, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			definition := tc.definition
+			if definition != "" {
+				path := "models/smart.yaml"
+				if definition == applicationYAML {
+					definition = strings.Replace(definition, "name: product", "name: saved", 1)
+					path = "applications/saved.yaml"
+				}
+				writeFiles(t, root, map[string]string{path: definition})
+			}
+			plans, writes := 0, 0
+			binding := object{"kind": "application", "name": "saved", "id": "app_0123456789ABCDEF"}
+			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/v0/auth/identity":
+					io.WriteString(w, `{"principal":{"user_id":"usr_0123456789ABCDEF"},"authentication":{"method":"pat"}}`)
+				case r.URL.Path == "/v0/projects/prj_0123456789ABCDEF":
+					io.WriteString(w, `{"id":"prj_0123456789ABCDEF","status":"active","display_name":"Safe"}`)
+				case strings.HasSuffix(r.URL.Path, "/stack/bindings"):
+					io.WriteString(w, wire(object{"version": 1, "bindings": []any{binding}}))
+				case strings.HasSuffix(r.URL.Path, "/stack/plan"):
+					plans++
+					v, _ := decodeJSON([]byte(validReadSetJSON), false)
+					readSet := obj(v)
+					if tc.completeReadSet {
+						readSet["bindings"] = append(list(readSet["bindings"]), binding)
+						readSet["resources"] = append(list(readSet["resources"]), object{"kind": "application", "id": binding["id"], "etag": "opaque"})
+					}
+					io.WriteString(w, wire(object{"version": 1, "read_set": readSet, "changes": []any{}}))
+				case strings.HasSuffix(r.URL.Path, "/stack/apply"):
+					writes++
+					io.WriteString(w, `{"version":1,"changed":false,"resources":[]}`)
+				case strings.HasSuffix(r.URL.Path, "/stack"):
+					io.WriteString(w, `{"version":1,"models":[],"tools":[],"agents":[],"applications":[{"name":"saved","spec":{"display_name":"Saved","agents":[]}}]}`)
+				}
+			}))
+			defer s.Close()
+			env := map[string]string{"AIMOUNT_TOKEN": "synthetic", "OPENAI_TEST": "synthetic-key"}
+			o := Options{Command: "apply", Root: root, API: s.URL, Project: "prj_0123456789ABCDEF", Approve: true, NonInteractive: true, Prune: tc.prune}
+			r := runner{ctx: context.Background(), env: env, errOut: io.Discard}
+			_, err := r.run(o)
+			if tc.want == "" && err != nil || tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) || plans != tc.plans || writes != tc.writes {
+				t.Fatal("wrong whole-Project guard", err, plans, writes)
+			}
+		})
 	}
 }

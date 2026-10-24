@@ -364,12 +364,20 @@ type inventory struct {
 	Managed       []string
 	Locators      map[string]string
 	models        []string
+	applications  []string
 	tools, agents []packageFiles
 	definitions   []definition
 }
 
 func discover(root string) inventory {
 	i := inventory{Locators: map[string]string{}}
+	for _, f := range entries(filepath.Join(root, "applications")) {
+		if strings.HasSuffix(f, ".yaml") {
+			i.applications = append(i.applications, f)
+			i.definitions = append(i.definitions, definition{"applications/" + f, "application"})
+			i.Managed = append(i.Managed, "applications/"+f)
+		}
+	}
 	for _, f := range entries(filepath.Join(root, "models")) {
 		if strings.HasSuffix(f, ".yaml") {
 			i.models = append(i.models, f)
@@ -756,14 +764,37 @@ func load(root string, env map[string]string, pull bool) (g graph, err error) {
 				g.Agents = append(g.Agents, a)
 			})
 		}
+		for _, f := range inv.applications {
+			collect(&errs, func() {
+				path := "applications/" + f
+				a := parent(parsed[path], "application", path)
+				s := strictObject(a["spec"], []string{"display_name", "agents"}, []string{"display_name", "agents"}, path)
+				display(s, path)
+				refs := []any{}
+				seen := map[string]bool{}
+				for _, v := range collection(s["agents"], path, 0) {
+					r := strictObject(v, []string{"name"}, []string{"name"}, path)
+					technical(r["name"], path, false)
+					name := str(r["name"])
+					if seen[name] {
+						fail(path, "duplicate Agent reference")
+					}
+					seen[name] = true
+					refs = append(refs, maps.Clone(r))
+				}
+				sortNamed(refs)
+				s["agents"] = refs
+				g.Applications = append(g.Applications, a)
+			})
+		}
 		if len(errs) > 0 {
 			err = &fileErrors{errs}
 			return
 		}
-		if !pull && len(g.Models)+len(g.Tools)+len(g.Agents) == 0 {
+		if !pull && len(g.Models)+len(g.Tools)+len(g.Agents)+len(g.Applications) == 0 {
 			fail(root, "no resource definitions", "discovery")
 		}
-		for _, group := range [][]object{g.Models, g.Tools, g.Agents} {
+		for _, group := range [][]object{g.Models, g.Tools, g.Agents, g.Applications} {
 			sort.Slice(group, func(i, j int) bool { return str(group[i]["name"]) < str(group[j]["name"]) })
 		}
 		for _, p := range pending {
@@ -863,6 +894,8 @@ func orderedKeys(m object) []string {
 		order = strings.Fields("url auth timeout_seconds invocation_name")
 	case m["models"] != nil:
 		order = strings.Fields("display_name description enabled models tools")
+	case m["agents"] != nil:
+		order = strings.Fields("display_name agents")
 	case m["default"] != nil || m["allowed"] != nil || m["denied"] != nil:
 		order = strings.Fields("default allowed denied")
 	case m["contract"] != nil && m["name"] != nil:
@@ -908,6 +941,17 @@ func authored(kind, name string, archived any, s object) object {
 func render(g graph, locs map[string]string) (files map[string]string, err error) {
 	files = map[string]string{}
 	err = caught(func() {
+		for _, a := range g.Applications {
+			name := str(a["name"])
+			technical(name, "export", false)
+			s := obj(a["spec"])
+			refs := []any{}
+			for _, r := range objects(s["agents"]) {
+				refs = append(refs, fields(r, "name"))
+			}
+			sortNamed(refs)
+			files["applications/"+name+".yaml"] = yamlString(authored("application", name, a["archived"], object{"display_name": s["display_name"], "agents": refs}))
+		}
 		for _, m := range g.Models {
 			name := str(m["name"])
 			technical(name, "export", false)
@@ -1015,6 +1059,32 @@ func render(g graph, locs map[string]string) (files map[string]string, err error
 func validRemoteSpec(kind string, s object, partial bool) bool {
 	if s == nil {
 		return false
+	}
+	if kind == "application" {
+		if v, ok := s["display_name"]; ok {
+			if err := caught(func() { display(object{"display_name": v}, "export") }); err != nil {
+				return false
+			}
+		} else if !partial {
+			return false
+		}
+		v, ok := s["agents"]
+		if !ok {
+			return partial
+		}
+		refs, ok := v.([]any)
+		if !ok || len(refs) > 100 {
+			return false
+		}
+		seen := map[string]bool{}
+		for _, v := range refs {
+			name := str(obj(v)["name"])
+			if !nameRE.MatchString(name) || seen[name] {
+				return false
+			}
+			seen[name] = true
+		}
+		return true
 	}
 	for _, k := range []string{"display_name", "description", "instruction", "current_contract"} {
 		if v, ok := s[k]; ok {
@@ -1144,6 +1214,16 @@ func validRemoteSpec(kind string, s object, partial bool) bool {
 func projectSpec(kind string, s object) object {
 	var out object
 	switch kind {
+	case "application":
+		out = fields(s, "display_name")
+		if v, ok := s["agents"]; ok {
+			refs := []any{}
+			for _, r := range objects(v) {
+				refs = append(refs, fields(r, "name"))
+			}
+			sortNamed(refs)
+			out["agents"] = refs
+		}
 	case "model":
 		out = fields(s, "display_name", "description", "limits", "capabilities")
 		if v, ok := s["limits"]; ok {

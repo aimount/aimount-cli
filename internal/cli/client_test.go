@@ -277,7 +277,7 @@ func TestConsumedResponseShapesAreTolerantAndPrivate(t *testing.T) {
 func TestExportAndPlanDropUnknownOperationalFields(t *testing.T) {
 	for _, path := range []string{"/v0/projects/prj_0123456789ABCDEF/stack", "/v0/projects/prj_0123456789ABCDEF/stack/plan"} {
 		spec := `{"display_name":"Safe","enabled":true,"current_contract":"v1","future_secret":"never-output","contracts":[{"name":"v1","description":"Safe","type":"server_webhook","input_schema":{"type":"object","additionalProperties":false},"output_schema":{},"webhook":{"url_source":"env","url":"https://private.invalid/never-output","auth":"bearer_token","timeout_seconds":10,"token":"never-output"}}]}`
-		body := `{"version":1,"models":[],"agents":[],"tools":[{"name":"lookup","spec":` + spec + `}]}`
+		body := `{"version":1,"models":[],"agents":[],"applications":[],"tools":[{"name":"lookup","spec":` + spec + `}]}`
 		method := "GET"
 		if strings.HasSuffix(path, "/plan") {
 			method = "POST"
@@ -301,7 +301,7 @@ func TestExportAndPlanDropUnknownOperationalFields(t *testing.T) {
 
 func TestExportRefusesMalformedConsumedNodes(t *testing.T) {
 	for _, nodes := range []string{`null`, `[null]`, `[42]`, `[{"name":"primary","credentials":{"mode":"api_key"},"enabled":"false"}]`} {
-		body := `{"version":1,"models":[{"name":"smart","spec":{"nodes":` + nodes + `}}],"tools":[],"agents":[]}`
+		body := `{"version":1,"models":[{"name":"smart","spec":{"nodes":` + nodes + `}}],"tools":[],"agents":[],"applications":[]}`
 		s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, body) }))
 		c := newClient(s.URL, "synthetic")
 		_, e := c.stack(context.Background(), "prj_0123456789ABCDEF")
@@ -314,7 +314,7 @@ func TestExportRefusesMalformedConsumedNodes(t *testing.T) {
 
 func TestExportRefusesMalformedConsumedBoundsAndLifecycle(t *testing.T) {
 	for _, extra := range []string{`"archived":"false",`, `"archived":{},`} {
-		body := `{"version":1,"models":[{"name":"smart",` + extra + `"spec":{"nodes":[]}}],"tools":[],"agents":[]}`
+		body := `{"version":1,"models":[{"name":"smart",` + extra + `"spec":{"nodes":[]}}],"tools":[],"agents":[],"applications":[]}`
 		s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, body) }))
 		c := newClient(s.URL, "synthetic")
 		_, e := c.stack(context.Background(), "prj_0123456789ABCDEF")
@@ -324,7 +324,7 @@ func TestExportRefusesMalformedConsumedBoundsAndLifecycle(t *testing.T) {
 		}
 	}
 	for _, extra := range []string{`"limits":{"context_window_tokens":{"private":"secret"},"max_output_tokens":1},`, `"capabilities":{"input_modalities":["unknown"],"output_modalities":["text"],"tool_calling":true},`} {
-		body := `{"version":1,"models":[{"name":"smart","spec":{` + extra + `"nodes":[]}}],"tools":[],"agents":[]}`
+		body := `{"version":1,"models":[{"name":"smart","spec":{` + extra + `"nodes":[]}}],"tools":[],"agents":[],"applications":[]}`
 		s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, body) }))
 		c := newClient(s.URL, "synthetic")
 		_, e := c.stack(context.Background(), "prj_0123456789ABCDEF")
@@ -340,7 +340,7 @@ func TestStackReturnsLosslessGraph(t *testing.T) {
 		if r.Method != "GET" || r.URL.Path != "/v0/projects/prj_0123456789ABCDEF/stack" || r.Header.Get("Authorization") != "Bearer synthetic" {
 			t.Error("wrong Stack export request")
 		}
-		io.WriteString(w, `{"version":1,"models":[],"agents":[],"tools":[{"name":"lookup","spec":{"contracts":[{"name":"v1","type":"client","input_schema":{},"output_schema":{"const":9007199254740993,"examples":["1e400"]}}]}}]}`)
+		io.WriteString(w, `{"version":1,"models":[],"agents":[],"applications":[],"tools":[{"name":"lookup","spec":{"contracts":[{"name":"v1","type":"client","input_schema":{},"output_schema":{"const":9007199254740993,"examples":["1e400"]}}]}}]}`)
 	}))
 	defer s.Close()
 	g, e := newClient(s.URL, "synthetic").stack(context.Background(), "prj_0123456789ABCDEF")
@@ -350,5 +350,84 @@ func TestStackReturnsLosslessGraph(t *testing.T) {
 	schema := obj(objects(obj(g.Tools[0]["spec"])["contracts"])[0]["output_schema"])
 	if schema["const"] != json.Number("9007199254740993") || list(schema["examples"])[0] != "1e400" {
 		t.Fatal("Stack export changed schema literals")
+	}
+}
+
+func TestApplicationTransportCompleteGraphAndSafeProjection(t *testing.T) {
+	for _, tc := range []struct {
+		name, method, path, body string
+		valid                    bool
+	}{
+		{"missing new graph", "GET", "/stack", `{"version":1,"models":[],"tools":[],"agents":[]}`, false},
+		{"explicit empty", "GET", "/stack", `{"version":1,"models":[],"tools":[],"agents":[],"applications":[]}`, true},
+		{"application", "GET", "/stack", `{"version":1,"models":[],"tools":[],"agents":[],"applications":[{"name":"product","archived":true,"spec":{"display_name":"Product","agents":[{"id":"agt_0123456789ABCDEF","name":"main","future_secret":"never-output"}],"users":["never-output"]},"runtime_key":"never-output"}]}`, true},
+		{"missing connections", "GET", "/stack", `{"version":1,"models":[],"tools":[],"agents":[],"applications":[{"name":"product","spec":{"display_name":"Product"}}]}`, false},
+		{"invalid connections", "GET", "/stack", `{"version":1,"models":[],"tools":[],"agents":[],"applications":[{"name":"product","spec":{"display_name":"Product","agents":[null]}}]}`, false},
+		{"duplicate connections", "GET", "/stack", `{"version":1,"models":[],"tools":[],"agents":[],"applications":[{"name":"product","spec":{"display_name":"Product","agents":[{"name":"main"},{"name":"main"}]}}]}`, false},
+		{"duplicate resources", "GET", "/stack", `{"version":1,"models":[],"tools":[],"agents":[],"applications":[{"name":"product","spec":{"display_name":"Product","agents":[]}},{"name":"product","spec":{"display_name":"Other","agents":[]}}]}`, false},
+		{"unknown description", "GET", "/stack", `{"version":1,"models":[],"tools":[],"agents":[],"applications":[{"name":"product","spec":{"display_name":"Product","agents":[],"description":{"private":"never-output"}}}]}`, true},
+		{"binding", "GET", "/stack/bindings", `{"version":1,"bindings":[{"kind":"application","name":"product","id":"app_0123456789ABCDEF","future_secret":"never-output"}]}`, true},
+		{"plan", "POST", "/stack/plan", `{"version":1,"read_set":` + validReadSetJSON + `,"changes":[{"kind":"application","name":"product","operation":"UPDATE","before":{"agents":[]},"after":{"agents":[{"name":"main","future_secret":"never-output"}]}}]}`, true},
+		{"apply", "POST", "/stack/apply", `{"version":1,"changed":true,"resources":[{"kind":"application","id":"app_0123456789ABCDEF","etag":"opaque","version":1,"revision":1,"operation":"CREATE","changed":true,"future_secret":"never-output"}]}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, tc.body) }))
+			defer s.Close()
+			c := newClient(s.URL, "synthetic")
+			defer c.http.CloseIdleConnections()
+			var v any
+			var err error
+			if tc.path == "/stack" {
+				v, err = c.stack(context.Background(), "prj_0123456789ABCDEF")
+			} else {
+				v, err = c.request(context.Background(), tc.method, "/v0/projects/prj_0123456789ABCDEF"+tc.path, "{}", "")
+			}
+			if (err == nil) != tc.valid || strings.Contains(wire(v), "never-output") {
+				t.Fatal("incorrect Application projection", err, wire(v))
+			}
+		})
+	}
+}
+
+func TestApplicationPlanErasureScopeProjection(t *testing.T) {
+	for _, invalid := range []bool{false, true} {
+		scope := `["users","conversations","files","configuration"]`
+		if invalid {
+			scope = `[{"private":"never-output"}]`
+		}
+		s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			io.WriteString(w, `{"version":1,"read_set":`+validReadSetJSON+`,"changes":[{"kind":"application","name":"product","operation":"DELETE","runtime_cascade":true,"erasure_scope":`+scope+`}]}`)
+		}))
+		c := newClient(s.URL, "synthetic")
+		plan, err := c.request(context.Background(), "POST", "/v0/projects/prj_0123456789ABCDEF/stack/plan", "{}", "")
+		c.http.CloseIdleConnections()
+		s.Close()
+		if invalid {
+			if err == nil || strings.Contains(err.Error(), "never-output") {
+				t.Fatal("unsafe scope response accepted", err)
+			}
+		} else if err != nil || wire(obj(list(plan["changes"])[0])["erasure_scope"]) != scope {
+			t.Fatal("Application deletion scope lost", err, wire(plan))
+		}
+	}
+}
+
+func TestApplicationReadSetIdentityAndCoverage(t *testing.T) {
+	v, _ := decodeJSON([]byte(validReadSetJSON), false)
+	m := obj(v)
+	m["resources"] = append(list(m["resources"]), object{"kind": "application", "id": "app_0123456789ABCDEF", "etag": "opaque", "future_secret": "never-output"})
+	m["bindings"] = append(list(m["bindings"]), object{"kind": "application", "name": "product", "id": "app_0123456789ABCDEF"})
+	out, err := projectReadSet(m)
+	if err != nil || strings.Contains(wire(out), "never-output") {
+		t.Fatal("valid Application read-set rejected", err)
+	}
+	obj(list(m["resources"])[1])["id"] = "agt_0123456789ABCDEF"
+	if _, err := projectReadSet(m); err == nil {
+		t.Fatal("invalid Application ID accepted")
+	}
+	obj(list(m["resources"])[1])["id"] = "app_0123456789ABCDEF"
+	m["credentials"] = append(list(m["credentials"]), object{"kind": "application", "id": "app_0123456789ABCDEF", "name": "product", "target": "runtime", "version": 1})
+	if _, err := projectReadSet(m); err == nil {
+		t.Fatal("runtime key included in Stack read-set")
 	}
 }

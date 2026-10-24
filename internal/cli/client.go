@@ -402,7 +402,7 @@ func (c *Client) request(ctx context.Context, method, path, body, key string) (o
 		out := []any{}
 		for _, v := range rs {
 			r := obj(v)
-			if r == nil || !slices.Contains([]string{"model", "tool", "agent"}, str(r["kind"])) {
+			if r == nil || !slices.Contains([]string{"model", "tool", "agent", "application"}, str(r["kind"])) {
 				return bad(s, "invalid_response")
 			}
 			for _, k := range []string{"id", "etag", "operation"} {
@@ -451,7 +451,7 @@ func (c *Client) request(ctx context.Context, method, path, body, key string) (o
 		out := []any{}
 		for _, v := range bs {
 			b := obj(v)
-			if !slices.Contains([]string{"model", "tool", "agent"}, str(b["kind"])) || !nameRE.MatchString(str(b["name"])) || str(b["id"]) == "" {
+			if !slices.Contains([]string{"model", "tool", "agent", "application"}, str(b["kind"])) || !nameRE.MatchString(str(b["name"])) || str(b["id"]) == "" {
 				return bad(s, "invalid_response")
 			}
 			out = append(out, fields(b, "kind", "name", "id"))
@@ -470,10 +470,22 @@ func (c *Client) request(ctx context.Context, method, path, body, key string) (o
 		out := []any{}
 		for _, v := range changes {
 			r := obj(v)
-			if r == nil || !slices.Contains([]string{"model", "tool", "agent"}, str(r["kind"])) || str(r["name"]) == "" || str(r["operation"]) == "" {
+			if r == nil || !slices.Contains([]string{"model", "tool", "agent", "application"}, str(r["kind"])) || str(r["name"]) == "" || str(r["operation"]) == "" {
 				return bad(s, "invalid_response")
 			}
 			projected := fields(r, "kind", "name", "id", "operation", "archived", "runtime_cascade")
+			if v, ok := r["erasure_scope"]; ok {
+				scope, ok := v.([]any)
+				if !ok {
+					return bad(s, "invalid_response")
+				}
+				for _, item := range scope {
+					if !slices.Contains([]string{"users", "conversations", "files", "configuration", "private_tests", "private_files"}, str(item)) {
+						return bad(s, "invalid_response")
+					}
+				}
+				projected["erasure_scope"] = scope
+			}
 			for _, field := range []string{"before", "after"} {
 				if spec, ok := r[field]; ok {
 					if obj(spec) == nil || !validRemoteSpec(str(r["kind"]), obj(spec), true) {
@@ -561,17 +573,22 @@ func (c *Client) stack(ctx context.Context, projectID string) (graph, error) {
 	if !numberIs(m["version"], 1) {
 		return g, &APIError{Status: 200, Code: "invalid_response"}
 	}
-	for _, kind := range []string{"model", "tool", "agent"} {
+	for _, kind := range []string{"model", "tool", "agent", "application"} {
 		a, ok := m[kind+"s"].([]any)
 		if !ok {
 			return g, &APIError{Status: 200, Code: "invalid_response"}
 		}
 		out := []object{}
+		seen := map[string]bool{}
 		for _, v := range a {
 			r := obj(v)
 			if r == nil || !nameRE.MatchString(str(r["name"])) || obj(r["spec"]) == nil {
 				return g, &APIError{Status: 200, Code: "invalid_response"}
 			}
+			if kind == "application" && seen[str(r["name"])] {
+				return g, &APIError{Status: 200, Code: "invalid_response"}
+			}
+			seen[str(r["name"])] = true
 			if v, ok := r["archived"]; ok {
 				if _, ok := v.(bool); !ok {
 					return g, &APIError{Status: 200, Code: "invalid_response"}
@@ -591,6 +608,8 @@ func (c *Client) stack(ctx context.Context, projectID string) (graph, error) {
 			g.Tools = out
 		case "agent":
 			g.Agents = out
+		case "application":
+			g.Applications = out
 		}
 	}
 	return g, nil
@@ -617,7 +636,7 @@ func projectReadSet(m object) (object, error) {
 		}
 		out[field] = m[field]
 	}
-	prefixes := map[string]string{"model": "mdl", "tool": "tol", "agent": "agt"}
+	prefixes := map[string]string{"model": "mdl", "tool": "tol", "agent": "agt", "application": "app"}
 	for _, field := range []string{"resources", "bindings", "credentials"} {
 		a, ok := m[field].([]any)
 		if !ok || len(a) > 100000 {
@@ -651,7 +670,7 @@ func projectReadSet(m object) (object, error) {
 				}
 				safe = append(safe, fields(r, "kind", "name", "id"))
 			case "credentials":
-				if kind == "agent" || !nameRE.MatchString(str(r["name"])) {
+				if (kind != "model" && kind != "tool") || !nameRE.MatchString(str(r["name"])) {
 					return bad()
 				}
 				targetRE := nameRE

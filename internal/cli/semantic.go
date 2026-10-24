@@ -15,7 +15,7 @@ func differences(before, after any, path string) []string {
 	a, aok := before.([]any)
 	b, bok := after.([]any)
 	if aok && bok {
-		if path == "tools" || strings.HasSuffix(path, ".allowed") || strings.HasSuffix(path, ".denied") {
+		if path == "agents" || path == "tools" || strings.HasSuffix(path, ".allowed") || strings.HasSuffix(path, ".denied") {
 			key := func(v any) string {
 				if s, ok := v.(string); ok {
 					return s
@@ -44,6 +44,11 @@ func differences(before, after any, path string) []string {
 					removed = append(removed, v)
 				}
 			}
+			if len(added)+len(removed) == 0 {
+				return nil
+			}
+			sort.Strings(added)
+			sort.Strings(removed)
 			return []string{literal(path) + ": +" + wire(added) + " -" + wire(removed)}
 		}
 	}
@@ -88,7 +93,7 @@ func differences(before, after any, path string) []string {
 }
 func semantic(plan object) string {
 	ordered := objects(plan["changes"])
-	rank := map[string]int{"model": 0, "tool": 1, "agent": 2}
+	rank := map[string]int{"model": 0, "tool": 1, "agent": 2, "application": 3}
 	sort.SliceStable(ordered, func(i, j int) bool {
 		a, b := ordered[i], ordered[j]
 		if rank[str(a["kind"])] != rank[str(b["kind"])] {
@@ -100,7 +105,7 @@ func semantic(plan object) string {
 		return str(a["operation"]) < str(b["operation"])
 	})
 	lines := []string{}
-	for _, group := range []struct{ kind, field, label string }{{"model", "nodes", "Node"}, {"tool", "contracts", "Tool Contract"}, {"agent", "policies", "Policy"}} {
+	for _, group := range []struct{ kind, field, label string }{{"model", "nodes", "Node"}, {"tool", "contracts", "Tool Contract"}, {"agent", "policies", "Policy"}, {"application", "", ""}} {
 		changes := []object{}
 		for _, c := range ordered {
 			if c["kind"] == group.kind && c["operation"] != "ROTATE" {
@@ -109,8 +114,13 @@ func semantic(plan object) string {
 		}
 		for _, c := range changes {
 			line := literal(c["operation"]) + " " + literal(c["kind"]) + " " + literal(c["name"])
-			if c["runtime_cascade"] == true {
-				line += " — IRREVERSIBLE conversations/Files/private-test erasure intent (physical cleanup asynchronous)"
+			if c["operation"] == "DELETE" {
+				switch c["kind"] {
+				case "application":
+					line += " — IRREVERSIBLE Application-owned Users/conversations/Files/configuration erasure intent (physical cleanup asynchronous; shared Agents/Models/Tools preserved)"
+				case "agent":
+					line += " — IRREVERSIBLE Agent-owned private-test/files/configuration erasure intent (physical cleanup asynchronous; ordinary conversation history preserved)"
+				}
 			}
 			lines = append(lines, line)
 			if c["operation"] == "CREATE" {
@@ -132,6 +142,9 @@ func semantic(plan object) string {
 				if k != group.field {
 					for _, line := range differences(before[k], after[k], k) {
 						lines = append(lines, "  "+line)
+						if c["kind"] == "application" && c["operation"] == "UPDATE" && k == "agents" {
+							lines = append(lines, "  connection changes affect new inputs; detach alone preserves accepted work and ordinary history")
+						}
 					}
 				}
 			}

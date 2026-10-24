@@ -81,6 +81,9 @@ func TestExecutableManualExactApplyRetry(t *testing.T) {
 	root := filepath.Join(home, "stack")
 	os.MkdirAll(filepath.Join(root, "models"), 0700)
 	os.WriteFile(filepath.Join(root, "models/smart.yaml"), []byte("version: 1\nkind: model\nname: smart\nspec:\n  display_name: Smart\n  limits: {context_window_tokens: 8192, max_output_tokens: 1024}\n  capabilities: {input_modalities: [text], output_modalities: [text], tool_calling: false}\n  nodes:\n    - name: primary\n      display_name: Primary\n      provider: openai_compatible\n      api: responses\n      base_url: https://provider.example/v1\n      model: test\n      credentials: {none: {}}\n"), 0600)
+	os.MkdirAll(filepath.Join(root, "applications"), 0700)
+	appPath := filepath.Join(root, "applications/renamed.yaml")
+	os.WriteFile(appPath, []byte("version: 1\nkind: application\nname: product\nspec:\n  display_name: Reviewed application\n  agents: []\n"), 0600)
 	plans := 0
 	type captured struct{ path, body, key string }
 	writes := []captured{}
@@ -91,10 +94,14 @@ func TestExecutableManualExactApplyRetry(t *testing.T) {
 		case r.URL.Path == "/v0/projects/prj_0123456789ABCDEF":
 			io.WriteString(w, `{"id":"prj_0123456789ABCDEF","status":"active","display_name":"Safe"}`)
 		case strings.HasSuffix(r.URL.Path, "/stack/bindings"):
-			io.WriteString(w, `{"version":1,"bindings":[]}`)
+			io.WriteString(w, `{"version":1,"bindings":[{"kind":"application","name":"product","id":"app_0123456789ABCDEF"}]}`)
 		case strings.HasSuffix(r.URL.Path, "/stack/plan"):
 			plans++
-			io.WriteString(w, `{"version":1,"read_set":{"resources":[],"bindings":[],"membership_incarnation":"00000000-0000-4000-8000-000000000001","membership_version":1,"membership_access_epoch":0,"project_lifecycle_epoch":0,"credentials":[],"future_secret":"synthetic-private"},"changes":[{"kind":"model","name":"smart","operation":"CREATE"}]}`)
+			body, _ := io.ReadAll(r.Body)
+			if !strings.Contains(string(body), `"applications":[{"archived":false,"name":"product","spec":{"agents":[],"display_name":"Reviewed application"}}]`) {
+				t.Error("plan lost complete Application graph")
+			}
+			io.WriteString(w, `{"version":1,"read_set":{"resources":[{"kind":"application","id":"app_0123456789ABCDEF","etag":"original-application-etag"}],"bindings":[{"kind":"application","name":"product","id":"app_0123456789ABCDEF"}],"membership_incarnation":"00000000-0000-4000-8000-000000000001","membership_version":1,"membership_access_epoch":0,"project_lifecycle_epoch":0,"credentials":[],"future_secret":"synthetic-private"},"changes":[{"kind":"model","name":"smart","operation":"CREATE"},{"kind":"application","name":"product","operation":"UPDATE","before":{"display_name":"Saved application","agents":[]},"after":{"display_name":"Reviewed application","agents":[]}}]}`)
 		case strings.HasSuffix(r.URL.Path, "/stack/apply"):
 			b, _ := io.ReadAll(r.Body)
 			writes = append(writes, captured{r.URL.Path, string(b), r.Header.Get("Idempotency-Key")})
@@ -103,10 +110,10 @@ func TestExecutableManualExactApplyRetry(t *testing.T) {
 				w.WriteHeader(503)
 				io.WriteString(w, `{"error":{"code":"service_unavailable"}}`)
 			} else {
-				io.WriteString(w, `{"version":1,"changed":true,"resources":[]}`)
+				io.WriteString(w, `{"version":1,"changed":true,"resources":[{"kind":"application","id":"app_0123456789ABCDEF","etag":"new-etag","version":2,"revision":2,"operation":"UPDATE","changed":true}]}`)
 			}
 		case strings.HasSuffix(r.URL.Path, "/stack"):
-			io.WriteString(w, `{"version":1,"models":[],"tools":[],"agents":[]}`)
+			io.WriteString(w, `{"version":1,"models":[],"tools":[],"agents":[],"applications":[{"name":"product","spec":{"display_name":"Saved application","agents":[]}}]}`)
 		default:
 			w.WriteHeader(404)
 		}
@@ -134,6 +141,9 @@ func TestExecutableManualExactApplyRetry(t *testing.T) {
 			t.Fatal("retry prompt unavailable", output.String())
 		}
 	}
+	if err := os.WriteFile(appPath, []byte("not the approved graph\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	io.WriteString(stdin, "y\n")
 	if e := c.Wait(); e != nil {
 		t.Fatalf("manual retry failed: %v %s", e, output.String())
@@ -141,6 +151,9 @@ func TestExecutableManualExactApplyRetry(t *testing.T) {
 	stdin.Close()
 	if plans != 1 || len(writes) != 2 || writes[0] != writes[1] || !strings.Contains(writes[0].body, `"membership_incarnation":"00000000-0000-4000-8000-000000000001"`) || strings.Contains(writes[0].body, "synthetic-private") || strings.Contains(output.String(), "synthetic-private") {
 		t.Fatal("original operation not retained", plans, len(writes))
+	}
+	if !strings.Contains(writes[0].body, `"display_name":"Reviewed application"`) || !strings.Contains(writes[0].body, `"etag":"original-application-etag"`) || !strings.Contains(output.String(), "UPDATE application product") {
+		t.Fatal("Application graph/read-set/review not retained")
 	}
 }
 
@@ -173,6 +186,115 @@ func TestExecutablePullInsideRootRefuses(t *testing.T) {
 	b, e := os.ReadFile(filepath.Join(root, "notes.txt"))
 	if e != nil || string(b) != "untouched" {
 		t.Fatal("root altered")
+	}
+}
+
+func TestExecutableApplicationPullAtomicPublication(t *testing.T) {
+	bin := buildBinary(t)
+	for _, mode := range []string{"canonical", "connected", "missing-agent", "duplicate-agent", "managed-symlink", "local-edit"} {
+		t.Run(mode, func(t *testing.T) {
+			publish := mode == "canonical" || mode == "connected"
+			home := t.TempDir()
+			root := filepath.Join(home, "stack")
+			if err := os.MkdirAll(filepath.Join(root, "applications/examples"), 0750); err != nil {
+				t.Fatal(err)
+			}
+			original := "version: 1\nkind: application\nname: old\nspec: {display_name: Old, agents: []}\n"
+			if err := os.WriteFile(filepath.Join(root, "applications/old.yaml"), []byte(original), 0600); err != nil {
+				t.Fatal(err)
+			}
+			for path, contents := range map[string]string{"notes.txt": "unmanaged\n", "project.yaml": "unmanaged project\n", "applications/examples/deeper.yaml": "unmanaged example\n", "applications/ignored.yml": "unmanaged extension\n"} {
+				if err := os.WriteFile(filepath.Join(root, path), []byte(contents), 0640); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.Symlink("notes.txt", filepath.Join(root, "relative-link")); err != nil {
+				t.Fatal(err)
+			}
+			if mode == "managed-symlink" {
+				if err := os.Symlink("old.yaml", filepath.Join(root, "applications/product.yaml")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := os.Stat(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/v0/auth/identity":
+					io.WriteString(w, `{"principal":{"user_id":"usr_0123456789ABCDEF"},"authentication":{"method":"pat"}}`)
+				case "/v0/projects/prj_0123456789ABCDEF":
+					io.WriteString(w, `{"id":"prj_0123456789ABCDEF","status":"active","display_name":"Safe"}`)
+				case "/v0/projects/prj_0123456789ABCDEF/stack":
+					refs, models, agents := "[]", "[]", "[]"
+					if mode == "connected" {
+						refs = `[{"name":"zulu"},{"name":"alpha"}]`
+						models = `[{"name":"smart","spec":{"display_name":"Smart","limits":{"context_window_tokens":8192,"max_output_tokens":1024},"capabilities":{"input_modalities":["text"],"output_modalities":["text"],"tool_calling":false},"nodes":[{"name":"primary","display_name":"Primary","provider":"openai_compatible","api":"responses","base_url":"https://provider.example/v1","model":"test","credentials":{"mode":"none"}}]}}]`
+						agents = `[{"name":"zulu","spec":{"display_name":"Zulu","instruction":"Help","models":[{"name":"smart"}],"tools":[],"policies":[]}},{"name":"alpha","spec":{"display_name":"Alpha","instruction":"Help","models":[{"name":"smart"}],"tools":[],"policies":[]}}]`
+					}
+					if mode == "missing-agent" {
+						refs = `[{"name":"missing"}]`
+					}
+					if mode == "duplicate-agent" {
+						refs = `[{"name":"missing"},{"name":"missing"}]`
+					}
+					if mode == "local-edit" {
+						if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("edited during pull\n"), 0640); err != nil {
+							t.Error(err)
+						}
+					}
+					io.WriteString(w, `{"version":1,"models":`+models+`,"tools":[],"agents":`+agents+`,"applications":[{"name":"product","archived":true,"spec":{"display_name":"Product","agents":`+refs+`},"users":["never-output"],"runtime_key":"never-output"}]}`)
+				default:
+					t.Error("unexpected request", r.URL.Path)
+					w.WriteHeader(404)
+				}
+			}))
+			defer s.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			c := exec.CommandContext(ctx, bin, "pull", "--force", "--root", root, "--api-url", s.URL, "--project", "prj_0123456789ABCDEF", "--output", "json")
+			c.Env = isolatedEnv(home, "AIMOUNT_TOKEN=synthetic")
+			out, err := c.CombinedOutput()
+			if publish && err != nil || !publish && err == nil || strings.Contains(string(out), "never-output") {
+				t.Fatal("wrong atomic pull outcome", err, string(out))
+			}
+			after, err := os.Stat(root)
+			if err != nil || os.SameFile(before, after) == publish {
+				t.Fatal("whole-directory exchange or unchanged root not proven", err)
+			}
+			if publish {
+				data, err := os.ReadFile(filepath.Join(root, "applications/product.yaml"))
+				want := "version: 1\nkind: application\nname: product\narchived: true\nspec:\n  display_name: Product\n  agents: []\n"
+				if mode == "connected" {
+					want = strings.Replace(want, "agents: []", "agents:\n    - name: alpha\n    - name: zulu", 1)
+				}
+				if err != nil || string(data) != want {
+					t.Fatal("noncanonical Application published", err, string(data))
+				}
+				if _, err := os.Stat(filepath.Join(root, "applications/old.yaml")); !os.IsNotExist(err) {
+					t.Fatal("old managed Application retained", err)
+				}
+			} else if data, err := os.ReadFile(filepath.Join(root, "applications/old.yaml")); err != nil || string(data) != original {
+				t.Fatal("failed pull lost original Application", err)
+			}
+			notes := "unmanaged\n"
+			if mode == "local-edit" {
+				notes = "edited during pull\n"
+			}
+			for path, contents := range map[string]string{"notes.txt": notes, "project.yaml": "unmanaged project\n", "applications/examples/deeper.yaml": "unmanaged example\n", "applications/ignored.yml": "unmanaged extension\n"} {
+				data, err := os.ReadFile(filepath.Join(root, path))
+				if err != nil || string(data) != contents {
+					t.Fatal("unmanaged path changed", path, err)
+				}
+			}
+			if link, err := os.Readlink(filepath.Join(root, "relative-link")); err != nil || link != "notes.txt" {
+				t.Fatal("unmanaged symlink changed", err)
+			}
+			if info, err := os.Stat(filepath.Join(root, "notes.txt")); err != nil || info.Mode().Perm() != 0640 {
+				t.Fatal("unmanaged mode changed", err)
+			}
+		})
 	}
 }
 
