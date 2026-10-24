@@ -118,6 +118,9 @@ func (r *runner) selectItem(items []any, message string, o Options, single bool)
 }
 
 func canonical(kind, name string, current graph, bindings []object) string {
+	if kind == "application" {
+		return name // Applications have immutable names, never aliases.
+	}
 	var bound object
 	for _, b := range bindings {
 		if b["kind"] == kind && b["name"] == name {
@@ -149,7 +152,7 @@ func prepareGraph(desired, current graph, bindings []object) error {
 		}
 		return nil
 	}
-	for _, kind := range []string{"model", "tool", "agent"} {
+	for _, kind := range []string{"model", "tool", "agent", "application"} {
 		seen := map[string]bool{}
 		for _, r := range desired.group(kind) {
 			id := can(kind, str(r["name"]))
@@ -157,6 +160,24 @@ func prepareGraph(desired, current graph, bindings []object) error {
 				return commandError("duplicate_identity", "Several definitions resolve to one resource", 1)
 			}
 			seen[id] = true
+		}
+	}
+	for _, a := range desired.Applications {
+		seen := map[string]bool{}
+		for _, ref := range objects(obj(a["spec"])["agents"]) {
+			name := str(ref["name"])
+			agent := included("agent", name)
+			if agent == nil {
+				return commandError("incomplete_graph", "Application "+str(a["name"])+": Agent "+name+" missing locally", 1)
+			}
+			identity := can("agent", name)
+			if seen[identity] {
+				return commandError("duplicate_identity", "Application "+str(a["name"])+": several references resolve to one Agent", 1)
+			}
+			seen[identity] = true
+			if a["archived"] != true && agent["archived"] == true {
+				return commandError("invalid_lifecycle", "Application "+str(a["name"])+": active Application requires active Agents", 1)
+			}
 		}
 	}
 	for _, a := range desired.Agents {
@@ -343,6 +364,59 @@ func pullLocators(g graph, locs map[string]string, bindings []object) (map[strin
 		out[k] = v
 	}
 	return out, nil
+}
+
+func checkApplicationReadSet(current graph, bindings []object, readSet object) error {
+	bad := func() error {
+		return commandError("stack_read_set_conflict", "Incomplete or changed Application read-set; review a fresh whole-Project plan", 2)
+	}
+	expected := map[string]string{}
+	for _, b := range bindings {
+		if b["kind"] == "application" {
+			name, id := str(b["name"]), str(b["id"])
+			if expected[name] != "" || !idValid(id, "app") {
+				return bad()
+			}
+			expected[name] = id
+		}
+	}
+	if len(expected) != len(current.Applications) {
+		return bad()
+	}
+	ids := map[string]bool{}
+	for _, a := range current.Applications {
+		id := expected[str(a["name"])]
+		if id == "" || ids[id] {
+			return bad()
+		}
+		ids[id] = true
+	}
+	actual := map[string]string{}
+	for _, b := range objects(readSet["bindings"]) {
+		if b["kind"] == "application" {
+			name := str(b["name"])
+			if actual[name] != "" {
+				return bad()
+			}
+			actual[name] = str(b["id"])
+		}
+	}
+	if !maps.Equal(expected, actual) {
+		return bad()
+	}
+	for _, r := range objects(readSet["resources"]) {
+		if r["kind"] == "application" {
+			id := str(r["id"])
+			if !ids[id] {
+				return bad()
+			}
+			delete(ids, id)
+		}
+	}
+	if len(ids) != 0 {
+		return bad()
+	}
+	return nil
 }
 
 func (r *runner) run(o Options) (Result, error) {
@@ -668,7 +742,11 @@ func (r *runner) run(o Options) (Result, error) {
 			files, e := render(g, locs)
 			return files, local.Managed, e
 		}, func(stage string) error {
-			if _, e := load(stage, nil, true); e != nil {
+			staged, e := load(stage, nil, true)
+			if e != nil {
+				return e
+			}
+			if e := prepareGraph(staged, staged, nil); e != nil {
 				return e
 			}
 			if baseline != nil {
@@ -708,7 +786,7 @@ func (r *runner) run(o Options) (Result, error) {
 	}
 	if !o.Prune {
 		omitted := []string{}
-		for _, kind := range []string{"model", "tool", "agent"} {
+		for _, kind := range []string{"model", "tool", "agent", "application"} {
 			id := func(name string) string {
 				for _, b := range bindings {
 					if b["kind"] == kind && b["name"] == name {
@@ -734,6 +812,9 @@ func (r *runner) run(o Options) (Result, error) {
 	input := object{"graph": loaded, "prune": o.Prune}
 	plan, e := client.request(r.ctx, "POST", path+"/plan", wire(input), "")
 	if e != nil {
+		return result, e
+	}
+	if e := checkApplicationReadSet(current, bindings, obj(plan["read_set"])); e != nil {
 		return result, e
 	}
 	if o.Command == "plan" {

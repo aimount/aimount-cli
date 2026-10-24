@@ -6,7 +6,7 @@ Cloud CLI, Runtime API or Agent API CLI.
 
 ## Build and install locally
 
-Go 1.27.2 is the current build baseline. Linux and macOS, amd64 and arm64, are the
+Go 1.27.3 is the current build baseline. Linux and macOS, amd64 and arm64, are the
 supported build targets; Windows is not supported. Building a target is not native
 execution evidence for it.
 
@@ -69,6 +69,7 @@ tools/*/contracts/*.yaml
 agents/*/agent.yaml
 agents/*/instruction.md
 agents/*/policies/*.yaml
+applications/*.yaml
 ```
 
 Every YAML envelope contains `version: 1`, lowercase `kind`, technical `name`,
@@ -76,6 +77,22 @@ optional parent `archived`, and `spec`. Agent Models use ordered names; Tools us
 names or `{name, contract}`. Tool `current_contract` selects a discovered
 `tool_contract`. Policy Models contain `default` and optionally `allowed` or
 `denied`; Tool filters also allow one of these arrays.
+
+Applications use `kind: application`, an immutable technical name and only
+`display_name` plus a required, possibly empty `agents: [{name: main}]` set in
+`spec`. Connections refer to Agents defined in the complete local graph; they
+have no default responder or ordering. Pull sorts them by current primary name.
+Only fixed-depth `.yaml` files participate; `.yml` and deeper examples remain
+unmanaged. For example, an Application can exist before any Agent is connected:
+
+```yaml
+version: 1
+kind: application
+name: product
+spec:
+  display_name: Product assistant
+  agents: []
+```
 
 Model credentials use `{api_key: {from_env: VARIABLE}}` or `{none: {}}`.
 Webhook URL uses `{value: https://...}` or `{from_env: VARIABLE}`; auth uses
@@ -90,6 +107,18 @@ genuine fractions before conversion; schema numeric tokens remain exact.
 resources are authoritative: omitted saved parents need explicit irreversible
 `--prune`, independent of approval. Renames remain Console/API operations;
 existing aliases are resolved through fresh server bindings.
+Applications have no aliases: changing their name declares a different resource.
+Application omission requires `--prune` and authorizes erasure of its Users,
+conversations, files and configuration. Agent prune erases only its owned private
+tests/files and configuration, preserving ordinary Application history. Detaching
+an Agent connection needs no prune; it does not erase conversations or alone
+cancel accepted work. Physical cleanup remains asynchronous.
+
+Stack requests and export require an explicit `applications` array, even when
+empty, alongside `models`, `tools` and `agents`. Applications also participate in
+the complete identity bindings and resource ETag read-set; runtime keys, Users
+and Sessions never enter Stack configuration. Older incomplete Stack graphs are
+not partial-management inputs for this CLI/API contract.
 
 Tool Schema `pattern` and every `patternProperties` key use the Go standard
 library [`regexp` syntax](https://pkg.go.dev/regexp/syntax), not ECMAScript.

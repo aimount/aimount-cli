@@ -364,3 +364,74 @@ func TestExactIntegerAndSchemaCharacterization(t *testing.T) {
 		}
 	}
 }
+
+const applicationYAML = `version: 1
+kind: application
+name: product
+spec:
+  display_name: Product assistant
+  agents: []
+`
+
+func TestApplicationFilesStrictFixedDepthAndCanonical(t *testing.T) {
+	root := t.TempDir()
+	writeFiles(t, root, map[string]string{"applications/renamed.yaml": applicationYAML, "applications/example/deeper.yaml": "broken", "applications/ignored.yml": "broken"})
+	g, err := load(root, nil, false)
+	if err != nil || !strings.Contains(wire(g), `"applications":[{"archived":false,"name":"product","spec":{"agents":[],"display_name":"Product assistant"}}]`) {
+		t.Fatal("empty Application not discovered", err, wire(g))
+	}
+	i, err := inspect(root)
+	if err != nil || wire(i.Managed) != `["applications/renamed.yaml"]` {
+		t.Fatal("wrong Application discovery", i.Managed, err)
+	}
+	files, err := render(g, nil)
+	if err != nil || files["applications/product.yaml"] != applicationYAML {
+		t.Fatal("noncanonical Application", files, err)
+	}
+	archived := strings.Replace(applicationYAML, "spec:", "archived: true\nspec:", 1)
+	writeFiles(t, root, map[string]string{"applications/renamed.yaml": archived})
+	g, err = load(root, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, err = render(g, nil)
+	if err != nil || files["applications/product.yaml"] != archived {
+		t.Fatal("archived lifecycle lost", files, err)
+	}
+	for _, raw := range []string{
+		strings.Replace(applicationYAML, "  agents: []\n", "", 1),
+		strings.Replace(applicationYAML, "agents: []", "agents: null", 1),
+		strings.Replace(applicationYAML, "agents: []", "agents: [main]", 1),
+		strings.Replace(applicationYAML, "agents: []", "agents: [{name: main, id: agt_0123456789ABCDEF}]", 1),
+		strings.Replace(applicationYAML, "agents: []", "agents: [{name: main}, {name: main}]", 1),
+		strings.Replace(applicationYAML, "agents: []", "agents: []\n  description: unsupported", 1),
+		strings.Replace(applicationYAML, "agents: []", "agents: []\n  archived: true", 1),
+		strings.Replace(applicationYAML, "spec:", "archived: 1\nspec:", 1),
+		strings.Replace(applicationYAML, "name: product", "name: Product", 1),
+		strings.Replace(applicationYAML, "display_name: Product assistant", "display_name: ' '", 1),
+	} {
+		writeFiles(t, root, map[string]string{"applications/renamed.yaml": raw})
+		if _, err := load(root, nil, false); err == nil {
+			t.Errorf("invalid Application accepted: %s", raw)
+		}
+	}
+	writeFiles(t, root, map[string]string{"applications/renamed.yaml": applicationYAML, "applications/duplicate.yaml": applicationYAML})
+	if _, err := load(root, nil, false); err == nil {
+		t.Fatal("duplicate Application technical name accepted")
+	}
+}
+
+func TestApplicationCanonicalConnectionNamesAreAnUnorderedSet(t *testing.T) {
+	root := t.TempDir()
+	writeFiles(t, root, map[string]string{"applications/product.yaml": strings.Replace(applicationYAML, "agents: []", "agents: [{name: zulu}, {name: alpha}]", 1)})
+	g, err := load(root, nil, false)
+	if err != nil || wire(obj(g.Applications[0]["spec"])["agents"]) != `[{"name":"alpha"},{"name":"zulu"}]` {
+		t.Fatal("normalized Application connections are not sorted", err)
+	}
+	obj(g.Applications[0]["spec"])["agents"] = []any{object{"name": "zulu", "id": "agt_0000000000000002"}, object{"name": "alpha", "id": "agt_0000000000000001"}}
+	files, err := render(g, nil)
+	want := strings.Replace(applicationYAML, "agents: []", "agents:\n    - name: alpha\n    - name: zulu", 1)
+	if err != nil || files["applications/product.yaml"] != want {
+		t.Fatal("portable canonical connections changed", err, files)
+	}
+}

@@ -17,19 +17,22 @@ import (
 
 type object = map[string]any
 type graph struct {
-	Version int      `json:"version"`
-	Models  []object `json:"models"`
-	Tools   []object `json:"tools"`
-	Agents  []object `json:"agents"`
+	Version      int      `json:"version"`
+	Models       []object `json:"models"`
+	Tools        []object `json:"tools"`
+	Agents       []object `json:"agents"`
+	Applications []object `json:"applications"`
 }
 
-func emptyGraph() graph { return graph{1, []object{}, []object{}, []object{}} }
+func emptyGraph() graph { return graph{1, []object{}, []object{}, []object{}, []object{}} }
 func (g graph) group(kind string) []object {
 	switch kind {
 	case "model":
 		return g.Models
 	case "tool":
 		return g.Tools
+	case "application":
+		return g.Applications
 	default:
 		return g.Agents
 	}
