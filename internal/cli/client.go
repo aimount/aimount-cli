@@ -488,10 +488,11 @@ func (c *Client) request(ctx context.Context, method, path, body, key string) (o
 			}
 			for _, field := range []string{"before", "after"} {
 				if spec, ok := r[field]; ok {
-					if obj(spec) == nil || !validRemoteSpec(str(r["kind"]), obj(spec), true) {
+					p := readRemoteSpec(str(r["kind"]), obj(spec), true)
+					if p == nil {
 						return bad(s, "invalid_response")
 					}
-					projected[field] = projectSpec(str(r["kind"]), obj(spec))
+					projected[field] = p
 				}
 			}
 			if reviews, ok := r["credential_review"]; ok {
@@ -594,11 +595,12 @@ func (c *Client) stack(ctx context.Context, projectID string) (graph, error) {
 					return g, &APIError{Status: 200, Code: "invalid_response"}
 				}
 			}
-			if !validRemoteSpec(kind, obj(r["spec"]), false) {
+			spec := readRemoteSpec(kind, obj(r["spec"]), false)
+			if spec == nil {
 				return g, &APIError{Status: 200, Code: "invalid_response"}
 			}
 			p := fields(r, "name", "archived")
-			p["spec"] = projectSpec(kind, obj(r["spec"]))
+			p["spec"] = spec
 			out = append(out, p)
 		}
 		switch kind {

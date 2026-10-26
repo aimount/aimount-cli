@@ -1056,49 +1056,62 @@ func render(g graph, locs map[string]string) (files map[string]string, err error
 	})
 	return
 }
-func validRemoteSpec(kind string, s object, partial bool) bool {
+
+// readRemoteSpec validates consumed response fields and returns only safe fields.
+// A nil result is invalid; an empty object is a valid partial spec.
+func readRemoteSpec(kind string, s object, partial bool) object {
 	if s == nil {
-		return false
+		return nil
 	}
 	if kind == "application" {
+		out := fields(s, "display_name")
 		if v, ok := s["display_name"]; ok {
 			if err := caught(func() { display(object{"display_name": v}, "export") }); err != nil {
-				return false
+				return nil
 			}
 		} else if !partial {
-			return false
+			return nil
 		}
 		v, ok := s["agents"]
 		if !ok {
-			return partial
+			if !partial {
+				return nil
+			}
+			return out
 		}
 		refs, ok := v.([]any)
 		if !ok || len(refs) > 100 {
-			return false
+			return nil
 		}
 		seen := map[string]bool{}
+		safe := []any{}
 		for _, v := range refs {
-			name := str(obj(v)["name"])
+			r := obj(v)
+			name := str(r["name"])
 			if !nameRE.MatchString(name) || seen[name] {
-				return false
+				return nil
 			}
 			seen[name] = true
+			safe = append(safe, fields(r, "name"))
 		}
-		return true
+		sortNamed(safe)
+		out["agents"] = safe
+		return out
 	}
 	for _, k := range []string{"display_name", "description", "instruction", "current_contract"} {
 		if v, ok := s[k]; ok {
 			if _, ok := v.(string); !ok {
-				return false
+				return nil
 			}
 		}
 	}
 	if v, ok := s["enabled"]; ok {
 		if _, ok := v.(bool); !ok {
-			return false
+			return nil
 		}
 	}
-	checkArray := func(field string, required bool, test func(object) bool) bool {
+	var out object
+	readArray := func(field string, required bool, read func(object) object) bool {
 		v, ok := s[field]
 		if !ok {
 			return !required
@@ -1107,195 +1120,158 @@ func validRemoteSpec(kind string, s object, partial bool) bool {
 		if !ok {
 			return false
 		}
+		safe := []any{}
 		for _, v := range a {
 			m := obj(v)
-			if m == nil || !test(m) {
+			if m == nil {
 				return false
 			}
+			p := read(m)
+			if p == nil {
+				return false
+			}
+			safe = append(safe, p)
 		}
+		out[field] = safe
 		return true
 	}
 	name := func(m object) bool { return nameRE.MatchString(str(m["name"])) }
 	switch kind {
 	case "model":
+		out = fields(s, "display_name", "description")
 		if v, ok := s["limits"]; ok {
 			m := obj(v)
 			if m == nil {
-				return false
+				return nil
 			}
 			contextN, cok := exactInt(m["context_window_tokens"], maxSafe, 1)
 			outputN, ook := exactInt(m["max_output_tokens"], maxSafe, 1)
 			if !cok || !ook || outputN > contextN {
-				return false
+				return nil
 			}
+			out["limits"] = fields(m, "context_window_tokens", "max_output_tokens")
 		}
 		if v, ok := s["capabilities"]; ok {
 			m := obj(v)
 			if m == nil {
-				return false
+				return nil
 			}
 			a, ok := m["input_modalities"].([]any)
 			if !ok || len(a) == 0 || wire(m["output_modalities"]) != `["text"]` {
-				return false
+				return nil
 			}
 			seen := map[string]bool{}
 			for _, v := range a {
 				value := str(v)
 				if !slices.Contains([]string{"text", "image", "file"}, value) || seen[value] {
-					return false
+					return nil
 				}
 				seen[value] = true
 			}
 			if !seen["text"] {
-				return false
+				return nil
 			}
 			if _, ok := m["tool_calling"].(bool); !ok {
-				return false
+				return nil
 			}
+			out["capabilities"] = fields(m, "input_modalities", "output_modalities", "tool_calling")
 		}
-		return checkArray("nodes", !partial, func(m object) bool {
+		if !readArray("nodes", !partial, func(m object) object {
 			if !name(m) || !slices.Contains([]string{"api_key", "none"}, str(obj(m["credentials"])["mode"])) {
-				return false
+				return nil
 			}
 			if v, ok := m["enabled"]; ok {
 				if _, ok := v.(bool); !ok {
-					return false
+					return nil
 				}
 			}
 			if v, ok := m["route_weight"]; ok {
 				if _, ok := exactInt(v, maxSafe, 1); !ok {
-					return false
+					return nil
 				}
 			}
 			for _, k := range []string{"display_name", "provider", "model", "api", "base_url"} {
 				if v, ok := m[k]; ok {
 					if _, ok := v.(string); !ok {
-						return false
+						return nil
 					}
 				}
 			}
-			return true
-		})
-	case "tool":
-		return checkArray("contracts", !partial, func(m object) bool {
-			if !contractRE.MatchString(str(m["name"])) || !slices.Contains([]string{"client", "server_webhook"}, str(m["type"])) || obj(m["input_schema"]) == nil || obj(m["output_schema"]) == nil {
-				return false
-			}
-			if w, ok := m["webhook"]; ok {
-				m := obj(w)
-				if m == nil || !slices.Contains([]string{"value", "env"}, str(m["url_source"])) || !slices.Contains([]string{"none", "bearer_token"}, str(m["auth"])) {
-					return false
-				}
-				if _, ok := exactInt(m["timeout_seconds"], 30, 1); !ok {
-					return false
-				}
-				if m["url_source"] == "value" {
-					if _, ok := m["url"].(string); !ok {
-						return false
-					}
-				}
-			}
-			return true
-		})
-	case "agent":
-		return checkArray("models", !partial, name) && checkArray("tools", !partial, func(m object) bool {
-			if !name(m) {
-				return false
-			}
-			if v, ok := m["contract"]; ok {
-				return contractRE.MatchString(str(v))
-			}
-			return true
-		}) && checkArray("policies", false, func(m object) bool { return name(m) && obj(m["models"]) != nil && obj(m["tools"]) != nil })
-	}
-	return false
-}
-
-func projectSpec(kind string, s object) object {
-	var out object
-	switch kind {
-	case "application":
-		out = fields(s, "display_name")
-		if v, ok := s["agents"]; ok {
-			refs := []any{}
-			for _, r := range objects(v) {
-				refs = append(refs, fields(r, "name"))
-			}
-			sortNamed(refs)
-			out["agents"] = refs
-		}
-	case "model":
-		out = fields(s, "display_name", "description", "limits", "capabilities")
-		if v, ok := s["limits"]; ok {
-			out["limits"] = fields(obj(v), "context_window_tokens", "max_output_tokens")
-		}
-		if v, ok := s["capabilities"]; ok {
-			out["capabilities"] = fields(obj(v), "input_modalities", "output_modalities", "tool_calling")
-		}
-		if v, ok := s["nodes"]; ok {
-			nodes := []any{}
-			for _, n := range objects(v) {
-				p := fields(n, "name", "display_name", "enabled", "route_weight", "provider", "model", "api", "base_url")
-				p["credentials"] = fields(obj(n["credentials"]), "mode")
-				nodes = append(nodes, p)
-			}
-			out["nodes"] = nodes
+			p := fields(m, "name", "display_name", "enabled", "route_weight", "provider", "model", "api", "base_url")
+			p["credentials"] = fields(obj(m["credentials"]), "mode")
+			return p
+		}) {
+			return nil
 		}
 	case "tool":
 		out = fields(s, "display_name", "description", "enabled", "current_contract")
-		if v, ok := s["contracts"]; ok {
-			contracts := []any{}
-			for _, c := range objects(v) {
-				p := fields(c, "name", "description", "type", "input_schema", "output_schema")
-				if w := obj(c["webhook"]); w != nil {
-					p["webhook"] = fields(w, "url_source", "auth", "timeout_seconds", "invocation_name")
-					if w["url_source"] == "value" {
-						obj(p["webhook"])["url"] = w["url"]
-					}
-				}
-				contracts = append(contracts, p)
+		if !readArray("contracts", !partial, func(m object) object {
+			if !contractRE.MatchString(str(m["name"])) || !slices.Contains([]string{"client", "server_webhook"}, str(m["type"])) || obj(m["input_schema"]) == nil || obj(m["output_schema"]) == nil {
+				return nil
 			}
-			out["contracts"] = contracts
+			p := fields(m, "name", "description", "type", "input_schema", "output_schema")
+			if w, ok := m["webhook"]; ok {
+				m := obj(w)
+				if m == nil || !slices.Contains([]string{"value", "env"}, str(m["url_source"])) || !slices.Contains([]string{"none", "bearer_token"}, str(m["auth"])) {
+					return nil
+				}
+				if _, ok := exactInt(m["timeout_seconds"], 30, 1); !ok {
+					return nil
+				}
+				p["webhook"] = fields(m, "url_source", "auth", "timeout_seconds", "invocation_name")
+				if m["url_source"] == "value" {
+					if _, ok := m["url"].(string); !ok {
+						return nil
+					}
+					obj(p["webhook"])["url"] = m["url"]
+				}
+			}
+			return p
+		}) {
+			return nil
 		}
 	case "agent":
 		out = fields(s, "display_name", "description", "instruction")
-		for _, field := range []string{"models", "tools"} {
-			if v, ok := s[field]; ok {
-				refs := []any{}
-				for _, r := range objects(v) {
-					refs = append(refs, fields(r, "name", "contract"))
-				}
-				out[field] = refs
+		if !readArray("models", !partial, func(m object) object {
+			if !name(m) {
+				return nil
 			}
-		}
-		if v, ok := s["policies"]; ok {
-			policies := []any{}
-			for _, p := range objects(v) {
-				safe := fields(p, "name", "display_name", "description", "enabled")
-				for _, field := range []string{"models", "tools"} {
-					f := obj(p[field])
-					clean := object{}
-					for _, k := range []string{"default", "allowed", "denied"} {
-						if v, ok := f[k]; ok {
-							if k == "default" {
-								clean[k] = fields(obj(v), "name")
-							} else {
-								a := []any{}
-								for _, r := range objects(v) {
-									a = append(a, fields(r, "name"))
-								}
-								clean[k] = a
+			return fields(m, "name", "contract")
+		}) || !readArray("tools", !partial, func(m object) object {
+			if !name(m) {
+				return nil
+			}
+			if v, ok := m["contract"]; ok && !contractRE.MatchString(str(v)) {
+				return nil
+			}
+			return fields(m, "name", "contract")
+		}) || !readArray("policies", false, func(m object) object {
+			if !name(m) || obj(m["models"]) == nil || obj(m["tools"]) == nil {
+				return nil
+			}
+			safe := fields(m, "name", "display_name", "description", "enabled")
+			for _, field := range []string{"models", "tools"} {
+				f := obj(m[field])
+				clean := object{}
+				for _, k := range []string{"default", "allowed", "denied"} {
+					if v, ok := f[k]; ok {
+						if k == "default" {
+							clean[k] = fields(obj(v), "name")
+						} else {
+							a := []any{}
+							for _, r := range objects(v) {
+								a = append(a, fields(r, "name"))
 							}
+							clean[k] = a
 						}
 					}
-					safe[field] = clean
 				}
-				policies = append(policies, safe)
+				safe[field] = clean
 			}
-			out["policies"] = policies
+			return safe
+		}) {
+			return nil
 		}
-	default:
-		out = object{}
 	}
 	return out
 }
