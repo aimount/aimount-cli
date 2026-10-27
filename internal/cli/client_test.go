@@ -299,6 +299,135 @@ func TestExportAndPlanDropUnknownOperationalFields(t *testing.T) {
 	}
 }
 
+func remoteSpecResponse(t *testing.T, kind, spec, field string) (object, error) {
+	t.Helper()
+	v, err := decodeJSON([]byte(spec), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := object{"version": 1, "models": []any{}, "tools": []any{}, "agents": []any{}, "applications": []any{}}
+	body[kind+"s"] = []any{object{"name": "safe", "spec": v}}
+	if field != "" {
+		readSet, _ := decodeJSON([]byte(validReadSetJSON), false)
+		body = object{"version": 1, "read_set": readSet, "changes": []any{object{"kind": kind, "name": "safe", "operation": "UPDATE", field: v}}}
+	}
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, wire(body)) }))
+	defer s.Close()
+	c := newClient(s.URL, "synthetic")
+	defer c.http.CloseIdleConnections()
+	if field == "" {
+		g, err := c.stack(context.Background(), "prj_0123456789ABCDEF")
+		if err != nil {
+			return nil, err
+		}
+		return obj(g.group(kind)[0]["spec"]), nil
+	}
+	plan, err := c.request(context.Background(), "POST", "/v0/projects/prj_0123456789ABCDEF/stack/plan", "{}", "")
+	if err != nil {
+		return nil, err
+	}
+	return obj(objects(plan["changes"])[0][field]), nil
+}
+
+func TestRemoteSpecProjectionPreservesConsumedValues(t *testing.T) {
+	for _, tc := range []struct {
+		name, kind, spec, want string
+		complete               bool
+	}{
+		{"model", "model",
+			`{"display_name":" Safe ","description":"line\r\nnext","limits":{"context_window_tokens":9007199254740991,"max_output_tokens":1e3,"future_secret":"never-output"},"capabilities":{"input_modalities":["file","text","image"],"output_modalities":["text"],"tool_calling":false,"future_secret":"never-output"},"nodes":[{"name":"z","credentials":{"mode":"api_key","key":"never-output"},"enabled":false,"route_weight":2e0,"provider":" provider ","base_url":"https://example.test/"},{"name":"a","credentials":{"mode":"none"}}],"enabled":true,"instruction":"ignored","future_secret":"never-output"}`,
+			`{"display_name":" Safe ","description":"line\r\nnext","limits":{"context_window_tokens":9007199254740991,"max_output_tokens":1e3},"capabilities":{"input_modalities":["file","text","image"],"output_modalities":["text"],"tool_calling":false},"nodes":[{"name":"z","credentials":{"mode":"api_key"},"enabled":false,"route_weight":2e0,"provider":" provider ","base_url":"https://example.test/"},{"name":"a","credentials":{"mode":"none"}}]}`, true},
+		{"tool schemas and webhook sources", "tool",
+			`{"contracts":[{"name":"2","type":"client","input_schema":{"future_keyword":{"const":9007199254740993}},"output_schema":{"const":1e400,"examples":["1e400"]},"future_secret":"never-output"},{"name":"1","type":"server_webhook","input_schema":{},"output_schema":{},"webhook":{"url_source":"env","url":{"private":"never-output"},"auth":"bearer_token","timeout_seconds":3e1,"invocation_name":" raw ","token":"never-output"}},{"name":"value","type":"server_webhook","input_schema":{},"output_schema":{},"webhook":{"url_source":"value","url":" https://example.test/ ","auth":"none","timeout_seconds":1}}]}`,
+			`{"contracts":[{"name":"2","type":"client","input_schema":{"future_keyword":{"const":9007199254740993}},"output_schema":{"const":1e400,"examples":["1e400"]}},{"name":"1","type":"server_webhook","input_schema":{},"output_schema":{},"webhook":{"url_source":"env","auth":"bearer_token","timeout_seconds":3e1,"invocation_name":" raw "}},{"name":"value","type":"server_webhook","input_schema":{},"output_schema":{},"webhook":{"url_source":"value","url":" https://example.test/ ","auth":"none","timeout_seconds":1}}]}`, true},
+		{"agent refs and policy filters", "agent",
+			`{"instruction":" raw\r\ntext\n\n","models":[{"name":"z","contract":null,"id":"never-output"},{"name":"a"}],"tools":[{"name":"z","contract":"1"},{"name":"a"}],"policies":[{"name":"p","models":{"default":null,"allowed":[{"name":"z","id":"never-output"},null,{"name":"a"}],"denied":42,"future_secret":"never-output"},"tools":{"default":{"name":"z","id":"never-output"}},"future_secret":"never-output"}],"future_secret":"never-output"}`,
+			`{"instruction":" raw\r\ntext\n\n","models":[{"name":"z","contract":null},{"name":"a"}],"tools":[{"name":"z","contract":"1"},{"name":"a"}],"policies":[{"name":"p","models":{"default":{},"allowed":[{"name":"z"},{},{"name":"a"}],"denied":[]},"tools":{"default":{"name":"z"}}}]}`, true},
+		{"application sorts refs only", "application",
+			`{"display_name":" Safe ","agents":[{"name":"z","id":"never-output"},{"name":"a"}],"description":{"private":"never-output"}}`,
+			`{"display_name":" Safe ","agents":[{"name":"a"},{"name":"z"}]}`, true},
+		{"empty model", "model", `{}`, `{}`, false},
+		{"empty tool", "tool", `{}`, `{}`, false},
+		{"empty agent", "agent", `{}`, `{}`, false},
+		{"empty application", "application", `{}`, `{}`, false},
+		{"missing agent tools", "agent", `{"models":[]}`, `{"models":[]}`, false},
+		{"missing agent models", "agent", `{"tools":[]}`, `{"tools":[]}`, false},
+		{"missing application display", "application", `{"agents":[]}`, `{"agents":[]}`, false},
+		{"missing application agents", "application", `{"display_name":"Safe"}`, `{"display_name":"Safe"}`, false},
+	} {
+		for _, field := range []string{"", "before", "after"} {
+			t.Run(tc.name+"/"+field, func(t *testing.T) {
+				out, err := remoteSpecResponse(t, tc.kind, tc.spec, field)
+				if field == "" && !tc.complete {
+					if err == nil {
+						t.Fatal("incomplete export accepted")
+					}
+					return
+				}
+				want, _ := decodeJSON([]byte(tc.want), false)
+				if err != nil || wire(out) != wire(want) {
+					t.Fatalf("projection changed: %v\ngot  %s\nwant %s", err, wire(out), wire(want))
+				}
+			})
+		}
+	}
+}
+
+func TestRemoteSpecRejectsMalformedConsumedFieldsInExportAndPlan(t *testing.T) {
+	for _, tc := range []struct{ kind, spec string }{
+		{"model", `null`},
+		{"model", `{"nodes":[],"display_name":null}`},
+		{"model", `{"nodes":[],"description":42}`},
+		{"model", `{"nodes":[],"instruction":false}`},
+		{"model", `{"nodes":[],"current_contract":{}}`},
+		{"model", `{"nodes":[],"enabled":null}`},
+		{"model", `{"nodes":[],"limits":null}`},
+		{"model", `{"nodes":[],"limits":{"context_window_tokens":1}}`},
+		{"model", `{"nodes":[],"limits":{"context_window_tokens":1,"max_output_tokens":2}}`},
+		{"model", `{"nodes":[],"limits":{"context_window_tokens":9007199254740992,"max_output_tokens":1}}`},
+		{"model", `{"nodes":[],"capabilities":null}`},
+		{"model", `{"nodes":[],"capabilities":{"input_modalities":[],"output_modalities":["text"],"tool_calling":true}}`},
+		{"model", `{"nodes":[],"capabilities":{"input_modalities":["image"],"output_modalities":["text"],"tool_calling":true}}`},
+		{"model", `{"nodes":[],"capabilities":{"input_modalities":["text","text"],"output_modalities":["text"],"tool_calling":true}}`},
+		{"model", `{"nodes":[],"capabilities":{"input_modalities":["text"],"output_modalities":[],"tool_calling":true}}`},
+		{"model", `{"nodes":[],"capabilities":{"input_modalities":["text"],"output_modalities":["text"],"tool_calling":"true"}}`},
+		{"model", `{"nodes":{}}`},
+		{"model", `{"nodes":[null]}`},
+		{"model", `{"nodes":[{"name":"INVALID","credentials":{"mode":"none"}}]}`},
+		{"model", `{"nodes":[{"name":"safe","credentials":{"mode":"unknown"}}]}`},
+		{"model", `{"nodes":[{"name":"safe","credentials":{"mode":"none"},"enabled":0}]}`},
+		{"model", `{"nodes":[{"name":"safe","credentials":{"mode":"none"},"route_weight":1.0000000000000001}]}`},
+		{"model", `{"nodes":[{"name":"safe","credentials":{"mode":"none"},"route_weight":0}]}`},
+		{"model", `{"nodes":[{"name":"safe","credentials":{"mode":"none"},"provider":{}}]}`},
+		{"tool", `{"contracts":null}`},
+		{"tool", `{"contracts":[null]}`},
+		{"tool", `{"contracts":[{"name":"INVALID","type":"client","input_schema":{},"output_schema":{}}]}`},
+		{"tool", `{"contracts":[{"name":"1","type":"unknown","input_schema":{},"output_schema":{}}]}`},
+		{"tool", `{"contracts":[{"name":"1","type":"client","input_schema":null,"output_schema":{}}]}`},
+		{"tool", `{"contracts":[{"name":"1","type":"client","input_schema":{},"output_schema":true}]}`},
+		{"tool", `{"contracts":[{"name":"1","type":"client","input_schema":{},"output_schema":{},"webhook":null}]}`},
+		{"tool", `{"contracts":[{"name":"1","type":"client","input_schema":{},"output_schema":{},"webhook":{"url_source":"other","auth":"none","timeout_seconds":1}}]}`},
+		{"tool", `{"contracts":[{"name":"1","type":"client","input_schema":{},"output_schema":{},"webhook":{"url_source":"env","auth":"other","timeout_seconds":1}}]}`},
+		{"tool", `{"contracts":[{"name":"1","type":"client","input_schema":{},"output_schema":{},"webhook":{"url_source":"env","auth":"none","timeout_seconds":31}}]}`},
+		{"tool", `{"contracts":[{"name":"1","type":"client","input_schema":{},"output_schema":{},"webhook":{"url_source":"value","auth":"none","timeout_seconds":1}}]}`},
+		{"agent", `{"models":null,"tools":[]}`},
+		{"agent", `{"models":[{"name":"INVALID"}],"tools":[]}`},
+		{"agent", `{"models":[],"tools":[{"name":"safe","contract":null}]}`},
+		{"agent", `{"models":[],"tools":[],"policies":[{"name":"p","models":{},"tools":null}]}`},
+		{"application", `{"display_name":" ","agents":[]}`},
+		{"application", `{"display_name":"Safe","agents":null}`},
+		{"application", `{"display_name":"Safe","agents":[{"name":"same"},{"name":"same"}]}`},
+	} {
+		for _, field := range []string{"", "before", "after"} {
+			t.Run(tc.kind+"/"+tc.spec+"/"+field, func(t *testing.T) {
+				if _, err := remoteSpecResponse(t, tc.kind, tc.spec, field); err == nil {
+					t.Fatal("malformed consumed spec accepted")
+				}
+			})
+		}
+	}
+}
+
 func TestExportRefusesMalformedConsumedNodes(t *testing.T) {
 	for _, nodes := range []string{`null`, `[null]`, `[42]`, `[{"name":"primary","credentials":{"mode":"api_key"},"enabled":"false"}]`} {
 		body := `{"version":1,"models":[{"name":"smart","spec":{"nodes":` + nodes + `}}],"tools":[],"agents":[],"applications":[]}`
