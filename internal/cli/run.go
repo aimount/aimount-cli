@@ -16,25 +16,27 @@ func Main(ctx context.Context, args []string, env map[string]string, in *os.File
 	selected := e == nil
 	var result Result
 	if e == nil {
-		r := runner{ctx: ctx, in: in, errOut: errOut, env: env}
-		result, e = r.run(o)
+		if o.Help != "" {
+			result = Result{Command: o.Command, Value: o.Help, Warnings: []string{}}
+		} else {
+			r := runner{ctx: ctx, in: in, errOut: errOut, env: env}
+			result, e = r.run(o)
+		}
 	}
 	if e == nil {
 		if o.Output == "json" {
 			fmt.Fprintln(out, wire(object{"version": 1, "command": result.Command, "ok": true, "result": result.Value, "warnings": result.Warnings}))
 		} else {
 			if s, ok := result.Value.(string); ok {
-				fmt.Fprintln(out, s)
-			} else if result.Command == "plan" {
-				m := obj(result.Value)
-				target := obj(m["target"])
-				project := obj(target["project"])
-				fmt.Fprintf(out, "API %s\nProject %s (%s)\n%s", wire(target["api"]), wire(project["id"]), wire(project["display_name"]), semantic(obj(m["plan"])))
+				fmt.Fprint(out, s)
+				if !strings.HasSuffix(s, "\n") {
+					fmt.Fprintln(out)
+				}
 			} else {
-				fmt.Fprintln(out, wire(result.Value))
+				printText(out, result)
 			}
 			for _, w := range result.Warnings {
-				fmt.Fprintln(errOut, wire(w))
+				fmt.Fprintln(errOut, "Warning: "+textValue(w))
 			}
 		}
 		return 0
@@ -47,7 +49,7 @@ func Main(ctx context.Context, args []string, env map[string]string, in *os.File
 		exit, code = ce.Exit, ce.Code
 	} else if errors.As(e, &ae) {
 		code = ae.Code
-		if (ae.Status == 409 || ae.Status == 412) && !ae.Unknown {
+		if (ae.Status == 409 || ae.Status == 412) && !ae.Unknown && ae.Code != "stack_prune_required" {
 			exit = 2
 		}
 		details = object{"status": ae.Status, "unknown": ae.Unknown, "retry_after": ae.RetryAfter}
@@ -67,7 +69,7 @@ func Main(ctx context.Context, args []string, env map[string]string, in *os.File
 	jsonMode := o.Output == "json"
 	if !selected {
 		for i, arg := range args {
-			if arg == "--output" && i+1 < len(args) && args[i+1] == "json" {
+			if arg == "--output=json" || arg == "--output" && i+1 < len(args) && args[i+1] == "json" {
 				jsonMode = true
 			}
 		}
@@ -82,7 +84,7 @@ func Main(ctx context.Context, args []string, env map[string]string, in *os.File
 		}
 		fmt.Fprintln(out, wire(object{"version": 1, "command": command, "ok": false, "error": object{"code": code, "message": e.Error(), "details": details}, "diagnostics": diagnostics}))
 	} else {
-		fmt.Fprintln(errOut, wire(e.Error()))
+		fmt.Fprintln(errOut, "Error: "+textValue(e.Error()))
 	}
 	return exit
 }

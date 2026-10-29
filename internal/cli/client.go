@@ -15,13 +15,13 @@ import (
 	"strings"
 	"time"
 	"unicode"
-	"unicode/utf8"
 
 	"golang.org/x/net/idna"
 )
 
 type Options struct {
 	Command                                    string
+	Help                                       string
 	Args                                       []string
 	Root, API, Project, Organization, Output   string
 	NonInteractive, Prune, Force, Approve, Yes bool
@@ -32,11 +32,13 @@ func normalizeAPI(value string) (string, error) {
 	if strings.ContainsAny(value, "?#\\") || strings.IndexFunc(value, unicode.IsSpace) >= 0 {
 		return bad()
 	}
-	prepared, err := decodeAPIHostname(value)
-	if err != nil {
+	// net/url decodes escaped non-ASCII host bytes, so inspect the authority first.
+	_, authority, _ := strings.Cut(value, "://")
+	authority, _, _ = strings.Cut(authority, "/")
+	if strings.Contains(authority, "%") {
 		return bad()
 	}
-	u, err := url.Parse(prepared)
+	u, err := url.Parse(value)
 	if err != nil || u.Hostname() == "" || u.User != nil || u.Opaque != "" || !slices.Contains([]string{"http", "https"}, u.Scheme) {
 		return bad()
 	}
@@ -53,16 +55,22 @@ func normalizeAPI(value string) (string, error) {
 		}
 	} else {
 		host, err = idna.New(idna.MapForLookup(), idna.Transitional(false), idna.StrictDomainName(false), idna.BidiRule(), idna.CheckHyphens(false), idna.VerifyDNSLength(false)).ToASCII(host)
-		if err != nil || host == "" {
+		if err != nil || host == "" || strings.ContainsAny(host, "%/:@[]\\?#<>^|") || strings.IndexFunc(host, unicode.IsControl) >= 0 {
 			return bad()
 		}
 		host = strings.ToLower(host)
-		ip, numeric, e := numericIPv4Host(host)
-		if e != nil {
-			return bad()
-		}
-		if numeric {
-			host = ip.String()
+		if ip, e := netip.ParseAddr(host); e == nil {
+			if !ip.Is4() {
+				return bad()
+			}
+		} else {
+			// Numeric final labels are ambiguous browser IPv4 spellings, not DNS.
+			domain := strings.TrimSuffix(host, ".")
+			last := domain[strings.LastIndexByte(domain, '.')+1:]
+			hex := strings.HasPrefix(last, "0x") && strings.Trim(last[2:], "0123456789abcdef") == ""
+			if hex || last != "" && strings.Trim(last, "0123456789") == "" {
+				return bad()
+			}
 		}
 	}
 	loopback := host == "::1"
@@ -119,148 +127,18 @@ func normalizeAPI(value string) (string, error) {
 	return strings.TrimRight(u.String(), "/"), nil
 }
 
-// net/url rejects percent-encoded domain names. Decode only that authority's
-// hostname once before parsing, never the path/port or an encoded delimiter.
-func decodeAPIHostname(value string) (string, error) {
-	start := strings.Index(value, "://")
-	if start < 0 {
-		return "", errors.New("invalid API URL")
-	}
-	start += 3
-	end := len(value)
-	if i := strings.IndexAny(value[start:], "/?#"); i >= 0 {
-		end = start + i
-	}
-	authority := value[start:end]
-	if strings.Contains(authority, "@") {
-		return "", errors.New("invalid API URL")
-	}
-	if strings.HasPrefix(authority, "[") {
-		return value, nil
-	}
-	host, port := authority, ""
-	if i := strings.LastIndexByte(authority, ':'); i >= 0 {
-		host, port = authority[:i], authority[i:]
-	}
-	decoded, e := url.PathUnescape(host)
-	if e != nil || !utf8.ValidString(decoded) || decoded == "" || strings.ContainsAny(decoded, "%/:@[]\\?#<>^|") || strings.IndexFunc(decoded, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0 {
-		return "", errors.New("invalid API URL")
-	}
-	return value[:start] + decoded + port + value[end:], nil
-}
-
-// WHATWG numeric IPv4 aliases use 1-4 decimal/octal/hex components; the last
-// component fills the remaining bytes. Domain names ending in a number must
-// satisfy this grammar instead of silently selecting a different saved PAT.
-func numericIPv4Host(host string) (netip.Addr, bool, error) {
-	parts := strings.Split(strings.TrimSuffix(host, "."), ".")
-	parse := func(s string) (uint64, error) {
-		base := 10
-		if strings.HasPrefix(strings.ToLower(s), "0x") {
-			base = 16
-			s = s[2:]
-		} else if len(s) > 1 && s[0] == '0' {
-			base = 8
-			s = s[1:]
-		}
-		if s == "" {
-			return 0, nil
-		}
-		return strconv.ParseUint(s, base, 64)
-	}
-	last := parts[len(parts)-1]
-	_, numberErr := parse(last)
-	digits := last != ""
-	for _, r := range last {
-		digits = digits && r >= '0' && r <= '9'
-	}
-	var numericErr *strconv.NumError
-	if numberErr != nil && !digits && !(errors.As(numberErr, &numericErr) && numericErr.Err == strconv.ErrRange) {
-		return netip.Addr{}, false, nil
-	}
-	bad := func() (netip.Addr, bool, error) {
-		return netip.Addr{}, true, errors.New("invalid numeric API hostname")
-	}
-	if len(parts) > 4 {
-		return bad()
-	}
-	var address uint64
-	for i, part := range parts {
-		if part == "" {
-			return bad()
-		}
-		number, e := parse(part)
-		if e != nil {
-			return bad()
-		}
-		if i < len(parts)-1 {
-			if number > 255 {
-				return bad()
-			}
-			address |= number << uint(8*(3-i))
-		} else {
-			if number >= uint64(1)<<uint(8*(5-len(parts))) {
-				return bad()
-			}
-			address |= number
-		}
-	}
-	return netip.AddrFrom4([4]byte{byte(address >> 24), byte(address >> 16), byte(address >> 8), byte(address)}), true, nil
-}
-func parseOptions(args []string, env map[string]string, tty bool) (Options, error) {
-	o := Options{Root: ".", Output: "text"}
-	values := map[string]string{}
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		switch a {
-		case "--prune":
-			o.Prune = true
-		case "--force":
-			o.Force = true
-		case "--auto-approve":
-			o.Approve = true
-		case "--yes":
-			o.Yes = true
-		case "--non-interactive":
-			o.NonInteractive = true
-		case "--no-color":
-		case "--root", "--api-url", "--project", "--organization", "--output":
-			if _, ok := values[a]; ok || i+1 >= len(args) || args[i+1] == "" || strings.HasPrefix(args[i+1], "--") {
-				return o, errors.New("invalid " + a)
-			}
-			i++
-			values[a] = args[i]
-		default:
-			if strings.HasPrefix(a, "-") {
-				return o, errors.New("unsupported option")
-			}
-			if o.Command == "" {
-				o.Command = a
-			} else {
-				o.Args = append(o.Args, a)
-			}
-		}
-	}
-	if !slices.Contains([]string{"auth", "switch", "projects", "link", "unlink", "status", "plan", "apply", "pull", "help"}, o.Command) {
-		return o, errors.New("expected auth, switch, projects, link, unlink, status, plan, apply or pull")
-	}
-	if v, ok := values["--output"]; ok {
-		if !slices.Contains([]string{"text", "json"}, v) {
-			return o, errors.New("invalid --output")
-		}
-		o.Output = v
+func resolveOptions(o Options, explicit map[string]bool, env map[string]string, tty bool) (Options, error) {
+	if !slices.Contains([]string{"text", "json"}, o.Output) {
+		return o, errors.New("invalid --output")
 	}
 	o.NonInteractive = o.NonInteractive || o.Output == "json" || env["CI"] == "true" || !tty
-	if v, ok := values["--root"]; ok {
-		o.Root = v
-	}
 	var err error
 	o.Root, err = filepath.Abs(o.Root)
 	if err != nil {
 		return o, errors.New("invalid root")
 	}
-	if v, ok := values["--api-url"]; ok {
-		o.API, err = normalizeAPI(v)
+	if explicit["api-url"] {
+		o.API, err = normalizeAPI(o.API)
 	} else if v, ok := env["AIMOUNT_API_URL"]; ok {
 		if strings.TrimSpace(v) == "" {
 			return o, errors.New("AIMOUNT_API_URL is empty")
@@ -270,9 +148,7 @@ func parseOptions(args []string, env map[string]string, tty bool) (Options, erro
 	if err != nil {
 		return o, err
 	}
-	if v, ok := values["--project"]; ok {
-		o.Project = v
-	} else if v, ok := env["AIMOUNT_PROJECT"]; ok {
+	if v, ok := env["AIMOUNT_PROJECT"]; ok && !explicit["project"] {
 		if strings.TrimSpace(v) == "" {
 			return o, errors.New("AIMOUNT_PROJECT is empty")
 		}
@@ -281,12 +157,8 @@ func parseOptions(args []string, env map[string]string, tty bool) (Options, erro
 	if o.Project != "" && !idValid(o.Project, "prj") {
 		return o, errors.New("invalid Project ID")
 	}
-	o.Organization = values["--organization"]
 	if o.Organization != "" && !idValid(o.Organization, "org") {
 		return o, errors.New("invalid Organization ID")
-	}
-	if (o.Prune && !slices.Contains([]string{"plan", "apply"}, o.Command)) || (o.Force && o.Command != "pull") || (o.Approve && o.Command != "apply") || (o.Yes && o.Command != "link") {
-		return o, errors.New("option not supported by command")
 	}
 	return o, nil
 }

@@ -96,7 +96,7 @@ func TestAPIHostnameAndNumericPortCanonicalization(t *testing.T) {
 	}
 }
 
-func TestAPIIPv6AndPercentHostnameCanonicalization(t *testing.T) {
+func TestAPIIPv6CanonicalizationAndEncodedHostnameRejection(t *testing.T) {
 	for _, tc := range [][2]string{
 		{"https://[0:0:0:0:0:0:0:1]/", "https://[::1]"},
 		{"http://[0:0:0:0:0:0:0:1]/base/", "http://[::1]/base"},
@@ -104,13 +104,15 @@ func TestAPIIPv6AndPercentHostnameCanonicalization(t *testing.T) {
 		{"https://[::ffff:192.0.2.128]/", "https://[::ffff:c000:280]"},
 		{"https://[0:0:0:0:0:ffff:c000:0280]/", "https://[::ffff:c000:280]"},
 		{"https://[0:0:0:0:0:ffff:192.0.2.1]", "https://[::ffff:c000:201]"},
-		{"https://%65xample.com/", "https://example.com"},
-		{"https://%62%C3%BCcher.example/base%2Fpart/", "https://xn--bcher-kva.example/base%2Fpart"},
-		{"https://%C3%BC.example", "https://xn--tda.example"},
 	} {
 		got, e := normalizeAPI(tc[0])
 		if e != nil || got != tc[1] {
 			t.Errorf("canonical host mismatch %s: %s %v", tc[0], got, e)
+		}
+	}
+	for _, u := range []string{"https://%65xample.com/", "https://%62%C3%BCcher.example/base%2Fpart/", "https://%C3%BC.example"} {
+		if _, err := normalizeAPI(u); err == nil {
+			t.Errorf("encoded hostname accepted %s", u)
 		}
 	}
 	for _, u := range []string{"https://exa%25mple.com/", "https://exa%2fmple.com/", "https://exa%40mple.com/", "https://exa%3ample.com/", "https://exa%20mple.com/", "https://exa%00mple.com/", "https://%2565xample.com/", "https://%5b%3a%3a1%5d/", "https://[fe80::1%25en0]/", "https://exa%23mple.com/", "https://exa%3fmple.com/", "https://exa%5cmple.com/", "https://exa%09mple.com/", "https://exa%FFmple.com/"} {
@@ -122,9 +124,13 @@ func TestAPIIPv6AndPercentHostnameCanonicalization(t *testing.T) {
 
 func TestAPINumericIPv4AliasesAndInvalidNumericHosts(t *testing.T) {
 	for _, tc := range [][2]string{{"https://127.1", "https://127.0.0.1"}, {"http://127.1", "http://127.0.0.1"}, {"https://0177.0.0.1", "https://127.0.0.1"}, {"https://0x7f.1", "https://127.0.0.1"}, {"https://2130706433", "https://127.0.0.1"}, {"https://127.0.0.01", "https://127.0.0.1"}, {"https://127.0.1", "https://127.0.0.1"}, {"https://127.1.", "https://127.0.0.1"}, {"https://1.2.65535", "https://1.2.255.255"}, {"http://0x7f000001", "http://127.0.0.1"}, {"https://127.0.0.0x1", "https://127.0.0.1"}} {
-		got, e := normalizeAPI(tc[0])
-		if e != nil || got != tc[1] {
-			t.Errorf("numeric host mismatch %s: %s %v", tc[0], got, e)
+		if _, e := normalizeAPI(tc[0]); e == nil {
+			t.Errorf("ambiguous numeric host accepted %s", tc[0])
+		}
+	}
+	for _, u := range []string{"https://127.0.0.1", "http://127.0.0.1", "https://192.0.2.128"} {
+		if got, err := normalizeAPI(u); err != nil || got != u {
+			t.Errorf("ordinary IPv4 rejected %s: %s %v", u, got, err)
 		}
 	}
 	for _, u := range []string{"https://256.0.0.1", "https://1.2.3.4.5", "https://example.1", "https://example.0x1", "https://example.09", "https://1.2.3.09", "https://4294967296"} {
@@ -138,6 +144,19 @@ func TestAPINumericOverflowAndForbiddenDecodedDomain(t *testing.T) {
 	for _, u := range []string{"https://0x100000000", "https://example.0x100000000", "https://exa%7cmple.com", "https://exa%5em ple.com", "https://exa%3cmple.com", "https://exa%3emple.com", "http://[::ffff:127.0.0.1]"} {
 		if _, e := normalizeAPI(u); e == nil {
 			t.Errorf("invalid canonical hostname accepted %s", u)
+		}
+	}
+}
+
+func TestAPINonnumericHexPrefixedDNSNames(t *testing.T) {
+	for _, u := range []string{"https://api.0xgateway", "https://api.0xgateway.", "https://0xservice", "https://api.0x12g"} {
+		if got, err := normalizeAPI(u); err != nil || got != u {
+			t.Errorf("nonnumeric DNS rejected: %s got=%s err=%v", u, got, err)
+		}
+	}
+	for _, u := range []string{"https://0x7f", "https://api.0x1", "https://0xffffffffffffffffffffffff", "https://api.0xffffffffffffffffffffffff"} {
+		if _, err := normalizeAPI(u); err == nil {
+			t.Errorf("numeric hex host accepted: %s", u)
 		}
 	}
 }
