@@ -4,9 +4,9 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"encoding/json/jsontext"
 	"errors"
 	"fmt"
-	"io"
 	"math/big"
 	"regexp"
 	"slices"
@@ -141,63 +141,13 @@ func escapeC1(s string) string {
 }
 func literal(v any) string { s := wire(fmt.Sprint(v)); return s[1 : len(s)-1] }
 func decodeJSON(raw []byte, strict bool) (any, error) {
-	if !utf8.Valid(raw) {
+	if !utf8.Valid(raw) || !jsontext.Value(raw).IsValid(jsontext.AllowDuplicateNames(!strict), jsontext.AllowInvalidUTF8(true)) {
 		return nil, errors.New("invalid JSON")
 	}
 	d := json.NewDecoder(bytes.NewReader(raw))
 	d.UseNumber()
-	var parse func() (any, error)
-	parse = func() (any, error) {
-		tok, err := d.Token()
-		if err != nil {
-			return nil, err
-		}
-		del, ok := tok.(json.Delim)
-		if !ok {
-			return tok, nil
-		}
-		switch del {
-		case '{':
-			m := object{}
-			for d.More() {
-				k, e := d.Token()
-				if e != nil {
-					return nil, e
-				}
-				s, ok := k.(string)
-				if !ok {
-					return nil, errors.New("invalid JSON")
-				}
-				if _, ok := m[s]; ok && strict {
-					return nil, errors.New("duplicate JSON field")
-				}
-				v, e := parse()
-				if e != nil {
-					return nil, e
-				}
-				m[s] = v
-			}
-			_, err = d.Token()
-			return m, err
-		case '[':
-			a := []any{}
-			for d.More() {
-				v, e := parse()
-				if e != nil {
-					return nil, e
-				}
-				a = append(a, v)
-			}
-			_, err = d.Token()
-			return a, err
-		}
-		return nil, errors.New("invalid JSON")
-	}
-	v, err := parse()
-	if err != nil {
-		return nil, errors.New("invalid JSON")
-	}
-	if _, err = d.Token(); err != io.EOF {
+	var v any
+	if err := d.Decode(&v); err != nil {
 		return nil, errors.New("invalid JSON")
 	}
 	return v, nil

@@ -106,18 +106,7 @@ func TestPromptSignalCancellationIsBounded(t *testing.T) {
 	}
 }
 
-func TestPrepareCredentialsAliasesPolicyAndSemantic(t *testing.T) {
-	desired := emptyGraph()
-	current := emptyGraph()
-	current.Models = []object{{"name": "smart", "spec": object{"nodes": []any{object{"name": "remove", "credentials": object{"mode": "api_key"}}, object{"name": "keep", "provider": "openai", "credentials": object{"mode": "api_key"}}}}}}
-	desired.Models = []object{{"name": "old_smart", "spec": object{"nodes": []any{object{"name": "keep", "provider": "openai", "credentials": object{"mode": "api_key"}}}}}}
-	bindings := []object{{"kind": "model", "name": "smart", "id": "mdl_0000000000000001"}, {"kind": "model", "name": "old_smart", "id": "mdl_0000000000000001"}}
-	if e := prepareGraph(desired, current, bindings); e != nil {
-		t.Fatal(e)
-	}
-	if wire(desired.Models[0]["credential_changes"]) != `[{"action":"remove","target":"remove"}]` {
-		t.Fatal(desired)
-	}
+func TestSemanticInstructionAndToolSet(t *testing.T) {
 	out := semantic(object{"changes": []any{object{"kind": "agent", "name": "support", "operation": "UPDATE", "before": object{"instruction": "Old", "tools": []any{object{"name": "lookup", "contract": "v1"}}}, "after": object{"instruction": "New\x1b", "tools": []any{object{"name": "lookup", "contract": "v2"}}}}}})
 	for _, s := range []string{"lookup@v1", "lookup@v2", "--- saved\n+++ desired", "\\u001b"} {
 		if !strings.Contains(out, s) {
@@ -168,22 +157,16 @@ func TestPullLocatorAliasIdentityAndAmbiguity(t *testing.T) {
 	}
 }
 
-func TestPoliciesAliasCeilingAndNewCredentials(t *testing.T) {
+func TestExportPolicyCeiling(t *testing.T) {
 	g := emptyGraph()
 	g.Models = []object{{"name": "smart", "spec": object{"nodes": []any{object{"name": "primary", "credentials": object{"mode": "none"}}}}}}
-	g.Agents = []object{{"name": "support", "spec": object{"models": []any{object{"name": "old_smart"}}, "tools": []any{}, "policies": []any{object{"name": "member", "models": object{"default": object{"name": "smart"}, "allowed": []any{object{"name": "smart"}}}, "tools": object{}}}}}}
-	bindings := []object{{"kind": "model", "name": "smart", "id": "mdl_0000000000000001"}, {"kind": "model", "name": "old_smart", "id": "mdl_0000000000000001"}}
-	if e := prepareGraph(g, g, bindings); e != nil {
+	g.Agents = []object{{"name": "support", "spec": object{"models": []any{object{"name": "smart"}}, "tools": []any{}, "policies": []any{object{"name": "member", "models": object{"default": object{"name": "smart"}, "allowed": []any{object{"name": "smart"}}}, "tools": object{}}}}}}
+	if e := validateExportGraph(g); e != nil {
 		t.Fatal(e)
 	}
 	obj(objects(obj(g.Agents[0]["spec"])["policies"])[0]["models"])["default"] = object{"name": "outside"}
-	if e := prepareGraph(g, g, bindings); e == nil {
+	if e := validateExportGraph(g); e == nil {
 		t.Fatal("policy outside effective ceiling accepted")
-	}
-	g.Agents = nil
-	obj(objects(obj(g.Models[0]["spec"])["nodes"])[0]["credentials"])["mode"] = "api_key"
-	if e := prepareGraph(g, emptyGraph(), nil); e == nil {
-		t.Fatal("new key without secret accepted")
 	}
 }
 
@@ -362,10 +345,7 @@ func TestActualPullPreservesSchemaScalarMeaning(t *testing.T) {
 	}
 }
 
-func TestApplicationCompleteReferencesAliasesAndLifecycle(t *testing.T) {
-	current := emptyGraph()
-	current.Agents = []object{{"name": "main"}}
-	bindings := []object{{"kind": "agent", "name": "main", "id": "agt_0123456789ABCDEF"}, {"kind": "agent", "name": "old_main", "id": "agt_0123456789ABCDEF"}}
+func TestExportApplicationCompleteReferencesAndLifecycle(t *testing.T) {
 	for _, tc := range []struct {
 		name                                     string
 		refs                                     []any
@@ -373,8 +353,8 @@ func TestApplicationCompleteReferencesAliasesAndLifecycle(t *testing.T) {
 	}{
 		{"empty", []any{}, false, false, false, true},
 		{"server dependency is not local", []any{object{"name": "main"}}, false, false, false, false},
-		{"portable alias", []any{object{"name": "old_main"}}, true, false, false, true},
-		{"duplicate stable Agent", []any{object{"name": "main"}, object{"name": "old_main"}}, true, false, false, false},
+		{"export must use primary names", []any{object{"name": "old_main"}}, true, false, false, false},
+		{"duplicate Agent", []any{object{"name": "main"}, object{"name": "main"}}, true, false, false, false},
 		{"active uses archived", []any{object{"name": "main"}}, true, true, false, false},
 		{"archived retains archived", []any{object{"name": "main"}}, true, true, true, true},
 	} {
@@ -391,7 +371,7 @@ func TestApplicationCompleteReferencesAliasesAndLifecycle(t *testing.T) {
 			if tc.local {
 				g.Agents = []object{{"name": "main", "archived": tc.agentArchived, "spec": object{"models": []any{}, "tools": []any{}}}}
 			}
-			err = prepareGraph(g, current, bindings)
+			err = validateExportGraph(g)
 			if (err == nil) != tc.valid {
 				t.Fatal("wrong complete Application validation", err)
 			}
@@ -419,32 +399,6 @@ func TestApplicationSemanticSetsAndAccurateErasureScope(t *testing.T) {
 	}
 }
 
-func TestApplicationReadSetRejectsChangedOrIncompleteIdentities(t *testing.T) {
-	g := emptyGraph()
-	g.Applications = []object{{"name": "product"}}
-	binding := object{"kind": "application", "name": "product", "id": "app_0123456789ABCDEF"}
-	for _, tc := range []struct {
-		name                string
-		bindings, resources []any
-		valid               bool
-	}{
-		{"complete", []any{binding}, []any{object{"kind": "application", "id": binding["id"], "etag": "opaque"}}, true},
-		{"unprotected application", []any{binding}, []any{}, false},
-		{"missing binding", []any{}, []any{object{"kind": "application", "id": binding["id"], "etag": "opaque"}}, false},
-		{"recreated name", []any{object{"kind": "application", "name": "product", "id": "app_0000000000000001"}}, []any{object{"kind": "application", "id": "app_0000000000000001", "etag": "opaque"}}, false},
-		{"extra saved application", []any{binding, object{"kind": "application", "name": "new", "id": "app_0000000000000001"}}, []any{}, false},
-		{"duplicate binding", []any{binding, binding}, []any{}, false},
-		{"duplicate resource", []any{binding}, []any{object{"kind": "application", "id": binding["id"], "etag": "opaque"}, object{"kind": "application", "id": binding["id"], "etag": "opaque"}}, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			err := checkApplicationReadSet(g, []object{binding}, object{"bindings": tc.bindings, "resources": tc.resources})
-			if (err == nil) != tc.valid {
-				t.Fatal("incorrect Application read-set protection", err)
-			}
-		})
-	}
-}
-
 func TestApplicationWholeProjectPruneReadSetAndEmptyGuards(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
@@ -454,9 +408,9 @@ func TestApplicationWholeProjectPruneReadSetAndEmptyGuards(t *testing.T) {
 		plans, writes          int
 	}{
 		{"empty prune is not delete all", "", "no resource definitions", true, true, 0, 0},
-		{"omitted application", modelYAML, "application saved", false, true, 0, 0},
+		{"omitted application", modelYAML, "stack_prune_required", false, true, 1, 0},
 		{"prune allows omission", modelYAML, "", true, true, 1, 1},
-		{"missing application read-set", applicationYAML, "Application read-set", false, false, 1, 0},
+		{"malformed application read-set", applicationYAML, "invalid_response", false, false, 1, 0},
 		{"complete application read-set", applicationYAML, "", false, true, 1, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -478,22 +432,28 @@ func TestApplicationWholeProjectPruneReadSetAndEmptyGuards(t *testing.T) {
 					io.WriteString(w, `{"principal":{"user_id":"usr_0123456789ABCDEF"},"authentication":{"method":"pat"}}`)
 				case r.URL.Path == "/v0/projects/prj_0123456789ABCDEF":
 					io.WriteString(w, `{"id":"prj_0123456789ABCDEF","status":"active","display_name":"Safe"}`)
-				case strings.HasSuffix(r.URL.Path, "/stack/bindings"):
-					io.WriteString(w, wire(object{"version": 1, "bindings": []any{binding}}))
 				case strings.HasSuffix(r.URL.Path, "/stack/plan"):
 					plans++
+					if tc.want == "stack_prune_required" {
+						w.WriteHeader(http.StatusConflict)
+						io.WriteString(w, `{"error":{"code":"stack_prune_required"}}`)
+						return
+					}
 					v, _ := decodeJSON([]byte(validReadSetJSON), false)
 					readSet := obj(v)
 					if tc.completeReadSet {
 						readSet["bindings"] = append(list(readSet["bindings"]), binding)
 						readSet["resources"] = append(list(readSet["resources"]), object{"kind": "application", "id": binding["id"], "etag": "opaque"})
+					} else {
+						delete(readSet, "resources")
 					}
 					io.WriteString(w, wire(object{"version": 1, "read_set": readSet, "changes": []any{}}))
 				case strings.HasSuffix(r.URL.Path, "/stack/apply"):
 					writes++
 					io.WriteString(w, `{"version":1,"changed":false,"resources":[]}`)
-				case strings.HasSuffix(r.URL.Path, "/stack"):
-					io.WriteString(w, `{"version":1,"models":[],"tools":[],"agents":[],"applications":[{"name":"saved","spec":{"display_name":"Saved","agents":[]}}]}`)
+				default:
+					t.Errorf("unexpected request %s", r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
 				}
 			}))
 			defer s.Close()

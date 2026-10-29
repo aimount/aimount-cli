@@ -117,36 +117,11 @@ func (r *runner) selectItem(items []any, message string, o Options, single bool)
 	return obj(items[i-1]), nil
 }
 
-func canonical(kind, name string, current graph, bindings []object) string {
-	if kind == "application" {
-		return name // Applications have immutable names, never aliases.
-	}
-	var bound object
-	for _, b := range bindings {
-		if b["kind"] == kind && b["name"] == name {
-			bound = b
-			break
-		}
-	}
-	if bound == nil {
-		return name
-	}
-	for _, b := range bindings {
-		if b["kind"] == kind && b["id"] == bound["id"] {
-			for _, r := range current.group(kind) {
-				if r["name"] == b["name"] {
-					return str(b["name"])
-				}
-			}
-		}
-	}
-	return name
-}
-func prepareGraph(desired, current graph, bindings []object) error {
-	can := func(kind, name string) string { return canonical(kind, name, current, bindings) }
+// Export uses only primary names. Validate its staged graph before local publication.
+func validateExportGraph(desired graph) error {
 	included := func(kind, name string) object {
 		for _, r := range desired.group(kind) {
-			if can(kind, str(r["name"])) == can(kind, name) {
+			if r["name"] == name {
 				return r
 			}
 		}
@@ -155,7 +130,7 @@ func prepareGraph(desired, current graph, bindings []object) error {
 	for _, kind := range []string{"model", "tool", "agent", "application"} {
 		seen := map[string]bool{}
 		for _, r := range desired.group(kind) {
-			id := can(kind, str(r["name"]))
+			id := str(r["name"])
 			if seen[id] {
 				return commandError("duplicate_identity", "Several definitions resolve to one resource", 1)
 			}
@@ -170,7 +145,7 @@ func prepareGraph(desired, current graph, bindings []object) error {
 			if agent == nil {
 				return commandError("incomplete_graph", "Application "+str(a["name"])+": Agent "+name+" missing locally", 1)
 			}
-			identity := can("agent", name)
+			identity := name
 			if seen[identity] {
 				return commandError("duplicate_identity", "Application "+str(a["name"])+": several references resolve to one Agent", 1)
 			}
@@ -204,9 +179,9 @@ func prepareGraph(desired, current graph, bindings []object) error {
 		}
 		for _, p := range objects(s["policies"]) {
 			models := obj(p["models"])
-			match := func(kind, name string, rs []object) bool {
+			match := func(name string, rs []object) bool {
 				for _, r := range rs {
-					if can(kind, name) == can(kind, str(r["name"])) {
+					if r["name"] == name {
 						return true
 					}
 				}
@@ -215,103 +190,21 @@ func prepareGraph(desired, current graph, bindings []object) error {
 			effective := []object{}
 			for _, m := range objects(s["models"]) {
 				_, allowed := models["allowed"]
-				if (!allowed || match("model", str(m["name"]), objects(models["allowed"]))) && !match("model", str(m["name"]), objects(models["denied"])) {
+				if (!allowed || match(str(m["name"]), objects(models["allowed"]))) && !match(str(m["name"]), objects(models["denied"])) {
 					effective = append(effective, m)
 				}
 			}
-			if len(effective) == 0 || !match("model", str(obj(models["default"])["name"]), effective) {
+			if len(effective) == 0 || !match(str(obj(models["default"])["name"]), effective) {
 				return commandError("invalid_policy", "Agent "+str(a["name"])+": invalid Policy Model selection", 1)
 			}
 			for _, kind := range []string{"model", "tool"} {
 				for _, group := range []string{"allowed", "denied"} {
 					for _, ref := range objects(obj(p[kind+"s"])[group]) {
-						if !match(kind, str(ref["name"]), objects(s[kind+"s"])) {
+						if !match(str(ref["name"]), objects(s[kind+"s"])) {
 							return commandError("invalid_policy", "Agent "+str(a["name"])+": Policy reference outside ceiling", 1)
 						}
 					}
 				}
-			}
-		}
-	}
-	for _, kind := range []string{"model", "tool"} {
-		for _, parent := range desired.group(kind) {
-			var old object
-			for _, r := range current.group(kind) {
-				if r["name"] == can(kind, str(parent["name"])) {
-					old = r
-					break
-				}
-			}
-			field := "nodes"
-			if kind == "tool" {
-				field = "contracts"
-			}
-			oldMembers := objects(obj(old["spec"])[field])
-			newMembers := objects(obj(parent["spec"])[field])
-			commands := list(parent["credential_changes"])
-			if commands == nil {
-				commands = []any{}
-			}
-			keyed := func(m object) bool {
-				if kind == "model" {
-					return obj(m["credentials"])["mode"] == "api_key"
-				}
-				return obj(m["webhook"])["auth"] == "bearer_token"
-			}
-			command := func(name string, replace bool) bool {
-				for _, v := range commands {
-					c := obj(v)
-					if c["target"] == name && (!replace || c["action"] == "replace") {
-						return true
-					}
-				}
-				return false
-			}
-			find := func(ms []object, name string) object {
-				for _, m := range ms {
-					if m["name"] == name {
-						return m
-					}
-				}
-				return nil
-			}
-			for _, m := range oldMembers {
-				if !keyed(m) {
-					continue
-				}
-				name := str(m["name"])
-				next := find(newMembers, name)
-				still := next != nil && keyed(next)
-				if !still && !command(name, false) {
-					commands = append(commands, object{"target": name, "action": "remove"})
-				} else if still && !command(name, false) {
-					changed := false
-					if kind == "model" {
-						for _, k := range []string{"provider", "api", "base_url"} {
-							changed = changed || wire(m[k]) != wire(next[k])
-						}
-					} else {
-						for _, k := range []string{"url_source", "url"} {
-							changed = changed || wire(obj(m["webhook"])[k]) != wire(obj(next["webhook"])[k])
-						}
-					}
-					if changed {
-						commands = append(commands, object{"target": name, "action": "retain"})
-					}
-				}
-			}
-			for _, next := range newMembers {
-				if !keyed(next) {
-					continue
-				}
-				name := str(next["name"])
-				before := find(oldMembers, name)
-				if (before == nil || !keyed(before)) && !command(name, true) {
-					return commandError("secret_required", kind+" "+str(parent["name"])+"/"+name+": new credential needs its environment value", 1)
-				}
-			}
-			if len(commands) > 0 {
-				parent["credential_changes"] = commands
 			}
 		}
 	}
@@ -366,59 +259,6 @@ func pullLocators(g graph, locs map[string]string, bindings []object) (map[strin
 	return out, nil
 }
 
-func checkApplicationReadSet(current graph, bindings []object, readSet object) error {
-	bad := func() error {
-		return commandError("stack_read_set_conflict", "Incomplete or changed Application read-set; review a fresh whole-Project plan", 2)
-	}
-	expected := map[string]string{}
-	for _, b := range bindings {
-		if b["kind"] == "application" {
-			name, id := str(b["name"]), str(b["id"])
-			if expected[name] != "" || !idValid(id, "app") {
-				return bad()
-			}
-			expected[name] = id
-		}
-	}
-	if len(expected) != len(current.Applications) {
-		return bad()
-	}
-	ids := map[string]bool{}
-	for _, a := range current.Applications {
-		id := expected[str(a["name"])]
-		if id == "" || ids[id] {
-			return bad()
-		}
-		ids[id] = true
-	}
-	actual := map[string]string{}
-	for _, b := range objects(readSet["bindings"]) {
-		if b["kind"] == "application" {
-			name := str(b["name"])
-			if actual[name] != "" {
-				return bad()
-			}
-			actual[name] = str(b["id"])
-		}
-	}
-	if !maps.Equal(expected, actual) {
-		return bad()
-	}
-	for _, r := range objects(readSet["resources"]) {
-		if r["kind"] == "application" {
-			id := str(r["id"])
-			if !ids[id] {
-				return bad()
-			}
-			delete(ids, id)
-		}
-	}
-	if len(ids) != 0 {
-		return bad()
-	}
-	return nil
-}
-
 func (r *runner) run(o Options) (Result, error) {
 	result := Result{Command: o.Command, Warnings: []string{}}
 	finish := func(command string, v any) (Result, error) {
@@ -427,12 +267,6 @@ func (r *runner) run(o Options) (Result, error) {
 		return result, nil
 	}
 	bad := func(code, message string) (Result, error) { return result, commandError(code, message, 1) }
-	if (o.Command == "auth" && (len(o.Args) != 1 || !slices.Contains([]string{"login", "logout", "status"}, o.Args[0]))) || (o.Command == "projects" && (len(o.Args) != 1 || o.Args[0] != "list")) || (!slices.Contains([]string{"auth", "projects"}, o.Command) && len(o.Args) > 0) {
-		return bad("command_invalid", "Invalid command arguments")
-	}
-	if o.Command == "help" {
-		return finish("help", "aimount auth login|logout|status; switch; projects list; link; unlink; status; plan [--prune]; apply [--prune] [--auto-approve]; pull [--force]")
-	}
 	if o.Command == "unlink" {
 		e := os.Remove(filepath.Join(o.Root, ".aimount/project.json"))
 		if e != nil && !os.IsNotExist(e) {
@@ -746,7 +580,7 @@ func (r *runner) run(o Options) (Result, error) {
 			if e != nil {
 				return e
 			}
-			if e := prepareGraph(staged, staged, nil); e != nil {
+			if e := validateExportGraph(staged); e != nil {
 				return e
 			}
 			if baseline != nil {
@@ -772,49 +606,9 @@ func (r *runner) run(o Options) (Result, error) {
 	if e != nil {
 		return result, e
 	}
-	current, e := client.stack(r.ctx, projectID)
-	if e != nil {
-		return result, e
-	}
-	baseline, e := client.request(r.ctx, "GET", path+"/bindings", "", "")
-	if e != nil {
-		return result, e
-	}
-	bindings := objects(baseline["bindings"])
-	if e = prepareGraph(loaded, current, bindings); e != nil {
-		return result, e
-	}
-	if !o.Prune {
-		omitted := []string{}
-		for _, kind := range []string{"model", "tool", "agent", "application"} {
-			id := func(name string) string {
-				for _, b := range bindings {
-					if b["kind"] == kind && b["name"] == name {
-						return str(b["id"])
-					}
-				}
-				return name
-			}
-			desired := map[string]bool{}
-			for _, r := range loaded.group(kind) {
-				desired[id(str(r["name"]))] = true
-			}
-			for _, r := range current.group(kind) {
-				if !desired[id(str(r["name"]))] {
-					omitted = append(omitted, kind+" "+str(r["name"]))
-				}
-			}
-		}
-		if len(omitted) > 0 {
-			return bad("stack_prune_required", "Omitted saved resources: "+strings.Join(omitted, ", ")+"; use --prune to review irreversible deletion")
-		}
-	}
 	input := object{"graph": loaded, "prune": o.Prune}
 	plan, e := client.request(r.ctx, "POST", path+"/plan", wire(input), "")
 	if e != nil {
-		return result, e
-	}
-	if e := checkApplicationReadSet(current, bindings, obj(plan["read_set"])); e != nil {
 		return result, e
 	}
 	if o.Command == "plan" {
@@ -824,7 +618,7 @@ func (r *runner) run(o Options) (Result, error) {
 		return bad("command_invalid", "Unsupported command")
 	}
 	if o.Output == "text" {
-		fmt.Fprintf(r.errOut, "API %s\nProject %s (%s)\nWhole Project; prune=%s. Partial nonempty roots can remove remote resources.\n%s", wire(api), wire(project["id"]), wire(project["display_name"]), wire(o.Prune), semantic(plan))
+		fmt.Fprintf(r.errOut, "API: %s\nProject: %s (%s)\nWhole Project; prune=%t. Partial nonempty roots can remove remote resources.\n%s", textValue(api), textValue(str(project["id"])), textValue(str(project["display_name"])), o.Prune, semantic(plan))
 	}
 	if len(list(plan["changes"])) > 0 {
 		if e = r.confirm("Apply this complete Project plan?", o, o.Approve); e != nil {

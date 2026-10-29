@@ -24,6 +24,9 @@ Candidate preparation does not publish releases, tags, packages or deployments.
 ## Commands
 
 ```sh
+aimount                     # Root help; no login required
+aimount auth                # Authentication subcommands
+aimount auth login --help   # Command-specific flags and examples
 aimount auth login --api-url https://api.aimount.io
 aimount auth status --output json
 aimount auth logout
@@ -36,7 +39,15 @@ aimount plan --root ./stack
 aimount apply --root ./stack --prune --auto-approve
 # Run pull outside the directory being replaced:
 aimount pull --root ./stack --force
+aimount completion zsh      # Generate an offline shell completion script
 ```
+
+Commands and flags use Cobra. `help [command]`, `-h` and `--help` work at every
+level without reading credentials/configuration or contacting the API, even when
+target environment values are invalid. Bare `auth` and `projects` show their
+subcommands. Completion supports bash, zsh, fish and PowerShell; generated scripts
+contain no resource discovery or stored credentials. Install a generated script
+using your shell's normal completion setup.
 
 Flags may be interspersed with command arguments. Common flags are `--root`,
 `--api-url`, `--project`, `--organization`, `--output text|json`,
@@ -51,6 +62,17 @@ authenticated command gets fresh identity and relies on current API membership.
 Selecting an Organization does not replace a Project binding or grant authority.
 API hostnames use IDNA ASCII canonicalization and numeric default-port removal,
 so equivalent Unicode/ASCII hosts and zero-padded ports select the same saved PAT.
+Use ordinary DNS/IDNA, dotted decimal IPv4 or bracketed IPv6. Percent-encoded
+hostnames and ambiguous numeric forms such as `127.1`, `0177.0.0.1`, `0x7f.1`
+and `2130706433` are rejected before transport or credential selection. Replace
+these spellings manually; no auth/config migration runs automatically.
+
+Plan/apply strictly parse the complete authored files, then let Stack API resolve
+aliases, references, lifecycle, Policies and omission/prune against current state.
+They do not download a preliminary export. API derives missing retain/remove
+credential intentions; new keyed members still need explicit environment-backed
+replacement values. Pull retains staged complete-graph validation and atomic
+`--force` replacement, including matching local `from_env` and unmanaged files.
 
 Device login requires a real terminal and validated HTTPS, even locally. It opens
 the OS browser, prints the manual URL/code, polls serially and refuses redirects.
@@ -158,6 +180,13 @@ success `0`; validation/auth/network `1`; concurrency `2`;
 confirmation/cancellation `3`. `CI=true`, a nonterminal stdin, JSON mode or
 `--non-interactive` disable prompts.
 
+Text mode shows context summaries, a Project table, managed file names and apply
+results. Errors/warnings are plain text on stderr, not JSON string literals;
+unsafe terminal control characters in data are escaped. Explicit `--output json`
+keeps the machine contract, including help/completion as success-envelope strings.
+The shell-internal `__complete` protocol stays raw regardless of `--output`; this
+exception is for generated completion scripts, not ordinary command automation.
+
 Apply retains one route/body/read-set/server-Date-derived `s1` key in process
 memory. Unknown outcomes offer only explicit identical retry after Retry-After
 interactively; there is no automatic resend, replan, rekey or receipt journal.
@@ -179,4 +208,5 @@ uses `go.yaml.in/yaml/v3` (MIT/Apache-2.0); JSON Schema grammar uses
 `golang.org/x/net/idna` (BSD-3-Clause), rather than a custom Punycode implementation.
 Schema compilation uses a detached numeric
 grammar projection, never replacing original data tokens. Dependencies are
-pinned in `go.mod`/`go.sum`; no CLI framework or API module is imported.
+pinned in `go.mod`/`go.sum`. Cobra (Apache-2.0) and pflag (BSD-3-Clause) own the
+command/help/flag shell; no Viper, generator or API module is imported.

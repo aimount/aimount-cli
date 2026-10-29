@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -59,6 +60,124 @@ func buildBinary(t *testing.T) string {
 		t.Fatalf("build: %s %v", out, e)
 	}
 	return bin
+}
+
+func TestExecutablePlannerErrorsPreserveExitCategories(t *testing.T) {
+	bin := buildBinary(t)
+	for _, command := range []string{"plan", "apply"} {
+		for _, tc := range []struct {
+			code         string
+			status, exit int
+		}{
+			{"stack_prune_required", http.StatusConflict, 1},
+			{"stack_read_set_conflict", http.StatusConflict, 2},
+			{"stack_credential_conflict", http.StatusPreconditionFailed, 2},
+		} {
+			t.Run(command+"/"+tc.code, func(t *testing.T) {
+				home := t.TempDir()
+				root := filepath.Join(home, "stack")
+				if err := os.MkdirAll(filepath.Join(root, "applications"), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(root, "applications/product.yaml"), []byte("version: 1\nkind: application\nname: product\nspec:\n  display_name: Product\n  agents: []\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch r.URL.Path {
+					case "/v0/auth/identity":
+						io.WriteString(w, `{"principal":{"user_id":"usr_0123456789ABCDEF"},"authentication":{"method":"pat"}}`)
+					case "/v0/projects/prj_0123456789ABCDEF":
+						io.WriteString(w, `{"id":"prj_0123456789ABCDEF","status":"active"}`)
+					case "/v0/projects/prj_0123456789ABCDEF/stack/plan":
+						w.WriteHeader(tc.status)
+						json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"code": tc.code}})
+					default:
+						t.Errorf("unexpected request %s", r.URL.Path)
+						w.WriteHeader(http.StatusNotFound)
+					}
+				}))
+				defer server.Close()
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				cmd := exec.CommandContext(ctx, bin, command, "--root", root, "--api-url", server.URL, "--project", "prj_0123456789ABCDEF", "--output=json")
+				cmd.Env = isolatedEnv(home, "AIMOUNT_TOKEN=synthetic")
+				out, err := cmd.Output()
+				var exit *exec.ExitError
+				if !errors.As(err, &exit) || exit.ExitCode() != tc.exit {
+					t.Fatalf("wrong planner error exit: %v output=%s want=%d", err, out, tc.exit)
+				}
+				var result struct {
+					OK    bool `json:"ok"`
+					Error struct {
+						Code string `json:"code"`
+					} `json:"error"`
+				}
+				if err := json.Unmarshal(out, &result); err != nil || result.OK || result.Error.Code != tc.code {
+					t.Fatalf("wrong error envelope: %s", out)
+				}
+			})
+		}
+	}
+}
+
+func TestExecutableStandardHelp(t *testing.T) {
+	bin := buildBinary(t)
+	for _, args := range [][]string{nil, {"auth"}, {"auth", "-h"}, {"--help"}, {"help", "apply"}} {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		cmd := exec.CommandContext(ctx, bin, args...)
+		cmd.Env = []string{"HOME=" + t.TempDir(), "PATH=/nonexistent", "AIMOUNT_API_URL="}
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
+		cancel()
+		if err != nil || stderr.Len() != 0 || !bytes.Contains(out, []byte("Usage:")) {
+			t.Fatalf("args=%v err=%v stdout=%s stderr=%s", args, err, out, &stderr)
+		}
+	}
+}
+
+func TestExecutableCompletionDoesNotExposeArguments(t *testing.T) {
+	bin := buildBinary(t)
+	for _, args := range [][]string{
+		{"__complete", "--api-url=https://synthetic-private.example.test", "auth", ""},
+		{"__complete", "auth", "--root", "synthetic-private", ""},
+		{"__complete", "--output=json", "auth", ""},
+		{"--output=json", "__complete", "auth", ""},
+		{"__completeNoDesc", "auth", ""},
+		{"__complete", "--unsupported=synthetic-private\x1b[31m", "auth", ""},
+		{"__complete", "auth", "--output=synthetic-private", ""},
+		{"__complete", "auth", "--api-url", ""},
+		{"__complete", "auth", "--root=a", "--root=b", ""},
+		{"__complete", "auth", "--output=json", "--unsupported=synthetic-private", ""},
+		{"__complete", "auth", "--output=json", "--root=a", "--root=b", ""},
+	} {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		home := t.TempDir()
+		debug := filepath.Join(home, "completion-debug")
+		cmd := exec.CommandContext(ctx, bin, args...)
+		cmd.Env = isolatedEnv(home, "BASH_COMP_DEBUG_FILE="+debug, "AIMOUNT_API_URL=")
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
+		cancel()
+		text := string(out)
+		if err != nil || stderr.Len() != 0 || strings.ContainsAny(text, "\x1b\x9b") || strings.Contains(text, "synthetic-private") || strings.HasPrefix(text, "{") {
+			t.Fatalf("args=%q err=%v stdout=%q stderr=%q", args, err, out, &stderr)
+		}
+		lines := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
+		if _, err := strconv.Atoi(strings.TrimPrefix(lines[len(lines)-1], ":")); err != nil {
+			t.Fatalf("missing final completion directive: %q", out)
+		}
+		if args[1] == "--api-url=https://synthetic-private.example.test" && !strings.Contains(text, "login\t") {
+			t.Fatalf("completed flag blocks subcommand completion: %q", out)
+		}
+		if len(args) > 3 && args[2] == "--output=json" && text != ":1\n" {
+			t.Fatalf("invalid hidden completion must remain a raw error directive: %q", out)
+		}
+		if data, err := os.ReadFile(debug); err == nil && (bytes.Contains(data, []byte("synthetic-private")) || bytes.ContainsRune(data, '\x1b')) {
+			t.Fatalf("completion debug file disclosed arguments: %q", data)
+		}
+	}
 }
 func ttyCommand(ctx context.Context, bin string, args ...string) *exec.Cmd {
 	if runtime.GOOS == "darwin" {
@@ -337,6 +456,22 @@ func TestExecutableLogoutCanonicalHostPreservesForeignPAT(t *testing.T) {
 				c := exec.CommandContext(ctx, bin, args...)
 				c.Env = env
 				out, e := c.Output()
+				rejected := strings.Contains(tc[0], "%") || strings.Contains(tc[0], "127.1") || strings.Contains(tc[0], "0177.")
+				if rejected {
+					var exit *exec.ExitError
+					if !errors.As(e, &exit) || exit.ExitCode() != 1 {
+						t.Fatalf("ambiguous endpoint not rejected: %v", e)
+					}
+					after, err := os.ReadFile(filepath.Join(dir, "auth.json"))
+					if err != nil || !bytes.Equal(after, data) {
+						t.Fatal("rejected endpoint changed authorization")
+					}
+					var envelope map[string]any
+					if err := json.Unmarshal(out, &envelope); err != nil || envelope["ok"] != false {
+						t.Fatalf("invalid rejection envelope: %s", out)
+					}
+					return
+				}
 				if e != nil {
 					t.Fatal("canonical logout refused", e)
 				}
