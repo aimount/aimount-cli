@@ -3,15 +3,11 @@ package cli
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"errors"
 	"fmt"
-	"io"
-	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 	"syscall"
 )
@@ -167,104 +163,6 @@ func updateAuthContext(ctx context.Context, path, api, token string, remove bool
 	}
 	return atomicJSONContext(ctx, path, auth)
 }
-func fingerprint(ctx context.Context, root string) (string, error) {
-	h := sha256.New()
-	e := filepath.WalkDir(root, func(path string, entry os.DirEntry, e error) error {
-		if e != nil {
-			return e
-		}
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		st, e := os.Lstat(path)
-		if e != nil {
-			return e
-		}
-		rel, _ := filepath.Rel(root, path)
-		fmt.Fprintf(h, "%s\x00%d:%d:%d\x00", rel, st.Mode(), st.Size(), st.ModTime().UnixNano())
-		if st.Mode()&os.ModeSymlink != 0 {
-			link, e := os.Readlink(path)
-			if e != nil {
-				return e
-			}
-			io.WriteString(h, link)
-		} else if st.Mode().IsRegular() {
-			f, e := os.Open(path)
-			if e != nil {
-				return e
-			}
-			_, e = io.Copy(h, f)
-			ce := f.Close()
-			if e != nil {
-				return e
-			}
-			return ce
-		}
-		return nil
-	})
-	if e != nil {
-		return "", errors.New("cannot fingerprint local root")
-	}
-	return fmt.Sprintf("%x", h.Sum(nil)), nil
-}
-func copyRoot(ctx context.Context, from, to string) error {
-	st, e := os.Lstat(from)
-	if e != nil {
-		return e
-	}
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-	switch {
-	case st.Mode()&os.ModeSymlink != 0:
-		link, e := os.Readlink(from)
-		if e != nil {
-			return e
-		}
-		return os.Symlink(link, to)
-	case st.IsDir():
-		if e := os.MkdirAll(to, 0700); e != nil {
-			return e
-		}
-		es, e := os.ReadDir(from)
-		if e != nil {
-			return e
-		}
-		for _, entry := range es {
-			if e := copyRoot(ctx, filepath.Join(from, entry.Name()), filepath.Join(to, entry.Name())); e != nil {
-				return e
-			}
-		}
-		if e := os.Chmod(to, st.Mode().Perm()); e != nil {
-			return e
-		}
-		return os.Chtimes(to, st.ModTime(), st.ModTime())
-	case st.Mode().IsRegular():
-		a, e := os.Open(from)
-		if e != nil {
-			return e
-		}
-		defer a.Close()
-		b, e := os.OpenFile(to, os.O_CREATE|os.O_EXCL|os.O_WRONLY, st.Mode().Perm())
-		if e != nil {
-			return e
-		}
-		_, e = io.Copy(b, a)
-		ce := b.Close()
-		if e != nil {
-			return e
-		}
-		if ce != nil {
-			return ce
-		}
-		if e := os.Chmod(to, st.Mode().Perm()); e != nil {
-			return e
-		}
-		return os.Chtimes(to, st.ModTime(), st.ModTime())
-	default:
-		return errors.New("unsupported unmanaged filesystem entry")
-	}
-}
 func managedPath(root, relative string) error {
 	if filepath.IsAbs(relative) || strings.Contains(relative, "\\") {
 		return errors.New("invalid managed path")
@@ -287,105 +185,38 @@ func managedPath(root, relative string) error {
 	}
 	return nil
 }
-func replaceRoot(ctx context.Context, root string, prepare func() (map[string]string, []string, error), validate func(string) error) (map[string]string, error) {
+func openResourceRoot(root string) (string, *os.File, error) {
 	root, e := filepath.EvalSymlinks(root)
 	if e != nil {
-		return nil, errors.New("unreadable root")
+		return "", nil, errors.New("unreadable root")
 	}
 	root, e = filepath.Abs(root)
 	if e != nil {
-		return nil, errors.New("invalid root")
+		return "", nil, errors.New("invalid root")
 	}
-	cwd, e := os.Getwd()
-	if e != nil {
-		return nil, errors.New("working directory unavailable")
-	}
-	cwd, e = filepath.EvalSymlinks(cwd)
-	if e != nil {
-		return nil, errors.New("working directory unavailable")
-	}
-	if cwd == root || strings.HasPrefix(cwd, root+string(os.PathSeparator)) {
-		return nil, errors.New("run atomic pull from outside root, using --root")
-	}
-	parent, name := filepath.Dir(root), filepath.Base(root)
 	st, e := os.Stat(root)
-	if e != nil || !st.IsDir() || root == parent || (runtime.GOOS != "darwin" && runtime.GOOS != "linux") {
-		return nil, errors.New("atomic pull requires a replaceable Linux/macOS root directory")
+	if e != nil || !st.IsDir() || root == filepath.Dir(root) || (runtime.GOOS != "darwin" && runtime.GOOS != "linux") {
+		return "", nil, errors.New("resource commands require a Linux/macOS root directory")
 	}
-	lockPath := filepath.Join(parent, "."+name+".aimount-pull.lock")
-	lock, e := os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-	if e != nil {
-		return nil, errors.New("another pull owns the root; leftover sibling lock requires explicit recovery")
-	}
-	defer func() { lock.Close(); os.Remove(lockPath) }()
-	before, e := fingerprint(ctx, root)
-	if e != nil {
-		return nil, e
-	}
-	files, managed, e := prepare()
+	lock, e := publicationLock(root)
+	return root, lock, e
+}
+
+func replaceRoot(ctx context.Context, root string, prepare func() (map[string]string, []string, error), validate func(string) error) (map[string]string, error) {
+	before, e := snapshotPull(ctx, root)
 	if e != nil {
 		return nil, e
 	}
-	stage, e := os.MkdirTemp(parent, "."+name+".aimount-pull-")
-	if e != nil {
-		return nil, errors.New("cannot create pull staging directory")
-	}
-	defer os.RemoveAll(stage)
-	paths := append([]string{}, managed...)
-	for p := range files {
-		paths = append(paths, p)
-	}
-	for _, rel := range paths {
-		if e := managedPath(root, rel); e != nil {
-			return nil, e
-		}
-	}
-	if e := copyRoot(ctx, root, stage); e != nil {
-		return nil, errors.New("cannot copy unmanaged root entries")
-	}
-	for _, rel := range managed {
-		if e := os.Remove(filepath.Join(stage, rel)); e != nil {
-			return nil, errors.New("cannot remove staged managed file")
-		}
-	}
-	for _, rel := range slices.Sorted(maps.Keys(files)) {
-		path := filepath.Join(stage, rel)
-		if e := os.MkdirAll(filepath.Dir(path), 0755); e != nil {
-			return nil, errors.New("cannot create managed directory")
-		}
-		f, e := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-		if e != nil {
-			return nil, errors.New("cannot create managed file")
-		}
-		_, e = f.WriteString(files[rel])
-		if e == nil {
-			e = f.Sync()
-		}
-		ce := f.Close()
-		if e != nil || ce != nil {
-			return nil, errors.New("cannot write managed file")
-		}
-	}
-	if validate != nil {
-		if e := validate(stage); e != nil {
-			return nil, e
-		}
-	}
-	after, e := fingerprint(ctx, root)
+	files, _, e := prepare()
 	if e != nil {
 		return nil, e
 	}
-	if before != after {
-		return nil, errors.New("local root changed during pull; retry explicitly")
+	journal, e := preparePull(ctx, root, files, before, validate)
+	if e != nil {
+		return nil, e
 	}
-	if ctx.Err() != nil {
-		return nil, commandError("cancelled", "Cancelled", 3)
-	}
-	if e := os.Chmod(stage, st.Mode().Perm()); e != nil {
-		return nil, errors.New("cannot preserve root permissions")
-	}
-	if e := exchangeDirectories(root, stage); e != nil {
-		return nil, errors.New("atomic directory exchange unavailable; root preserved")
+	if e = publishPull(ctx, root, journal); e != nil {
+		return nil, e
 	}
 	return files, nil
 }

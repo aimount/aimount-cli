@@ -55,11 +55,34 @@ func TestExecutableEnvelopesAndNoRuntime(t *testing.T) {
 
 func buildBinary(t *testing.T) string {
 	t.Helper()
+	if bin := os.Getenv("AIMOUNT_TEST_APP_CLI"); bin != "" {
+		if !filepath.IsAbs(bin) {
+			t.Fatal("AIMOUNT_TEST_APP_CLI must be absolute")
+		}
+		return bin
+	}
 	bin := filepath.Join(t.TempDir(), "aimount")
 	if out, e := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); e != nil {
 		t.Fatalf("build: %s %v", out, e)
 	}
 	return bin
+}
+
+func TestExecutableUsesExplicitCandidateWithoutCompiler(t *testing.T) {
+	if os.Getenv("AIMOUNT_TEST_CANDIDATE_HELPER") == "1" {
+		bin := buildBinary(t)
+		out, err := exec.Command(bin, "--help").CombinedOutput()
+		if err != nil || !bytes.Contains(out, []byte("Usage:")) {
+			t.Fatalf("candidate failed: %v %s", err, out)
+		}
+		return
+	}
+	bin := buildBinary(t)
+	cmd := exec.Command(os.Args[0], "-test.run=^TestExecutableUsesExplicitCandidateWithoutCompiler$")
+	cmd.Env = isolatedEnv(t.TempDir(), "PATH=/nonexistent", "AIMOUNT_TEST_CANDIDATE_HELPER=1", "AIMOUNT_TEST_APP_CLI="+bin)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("external candidate required compiler: %v %s", err, out)
+	}
 }
 
 func TestExecutablePlannerErrorsPreserveExitCategories(t *testing.T) {
@@ -276,18 +299,28 @@ func TestExecutableManualExactApplyRetry(t *testing.T) {
 	}
 }
 
-func TestExecutablePullInsideRootRefuses(t *testing.T) {
+func TestExecutablePullInsideRootKeepsParentShell(t *testing.T) {
 	bin := buildBinary(t)
 	home := t.TempDir()
 	root := filepath.Join(home, "stack")
 	os.Mkdir(root, 0700)
 	os.WriteFile(filepath.Join(root, "notes.txt"), []byte("untouched"), 0600)
+	before, err := os.Stat(root)
+	if err != nil {
+		t.Fatal(err)
+	}
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v0/auth/identity":
 			io.WriteString(w, `{"principal":{"type":"user","user_id":"usr_0123456789ABCDEF"},"authentication":{"method":"pat"}}`)
 		case "/v0/projects/prj_0123456789ABCDEF":
 			io.WriteString(w, `{"id":"prj_0123456789ABCDEF","status":"active","display_name":"Safe"}`)
+		case "/v0/projects/prj_0123456789ABCDEF/stack":
+			io.WriteString(w, `{"version":1,"models":[],"tools":[],"agents":[],"applications":[{"name":"product","spec":{"display_name":"Product","agents":[]}}]}`)
+		case "/v0/projects/prj_0123456789ABCDEF/stack/plan":
+			io.WriteString(w, `{"version":1,"read_set":{"resources":[],"bindings":[],"credentials":[],"membership_incarnation":"synthetic","membership_version":1,"membership_access_epoch":0,"project_lifecycle_epoch":0},"changes":[]}`)
+		case "/v0/projects/prj_0123456789ABCDEF/stack/apply":
+			io.WriteString(w, `{"version":1,"changed":false,"resources":[]}`)
 		default:
 			t.Error("unexpected Stack read")
 		}
@@ -295,12 +328,16 @@ func TestExecutablePullInsideRootRefuses(t *testing.T) {
 	defer s.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	c := exec.CommandContext(ctx, bin, "pull", "--api-url", s.URL, "--project", "prj_0123456789ABCDEF")
+	c := exec.CommandContext(ctx, "/bin/sh", "-ec", `"$1" link --project prj_0123456789ABCDEF; "$1" pull; test -f applications/product.yaml; "$1" plan; "$1" apply; "$1" pull --force; "$1" plan; test -f applications/product.yaml; test "$(cat notes.txt)" = untouched`, "--", bin)
 	c.Dir = root
-	c.Env = isolatedEnv(home, "AIMOUNT_TOKEN=synthetic")
+	c.Env = isolatedEnv(home, "AIMOUNT_TOKEN=synthetic", "AIMOUNT_API_URL="+s.URL)
 	out, e := c.CombinedOutput()
-	if e == nil || !strings.Contains(string(out), "outside root") {
+	if e != nil {
 		t.Fatal(e, string(out))
+	}
+	after, err := os.Stat(root)
+	if err != nil || !os.SameFile(before, after) {
+		t.Fatal("parent shell root changed", err)
 	}
 	b, e := os.ReadFile(filepath.Join(root, "notes.txt"))
 	if e != nil || string(b) != "untouched" {
@@ -312,7 +349,7 @@ func TestExecutableApplicationPullAtomicPublication(t *testing.T) {
 	bin := buildBinary(t)
 	for _, mode := range []string{"canonical", "connected", "missing-agent", "duplicate-agent", "managed-symlink", "local-edit"} {
 		t.Run(mode, func(t *testing.T) {
-			publish := mode == "canonical" || mode == "connected"
+			publish := mode == "canonical" || mode == "connected" || mode == "local-edit"
 			home := t.TempDir()
 			root := filepath.Join(home, "stack")
 			if err := os.MkdirAll(filepath.Join(root, "applications/examples"), 0750); err != nil {
@@ -379,8 +416,8 @@ func TestExecutableApplicationPullAtomicPublication(t *testing.T) {
 				t.Fatal("wrong atomic pull outcome", err, string(out))
 			}
 			after, err := os.Stat(root)
-			if err != nil || os.SameFile(before, after) == publish {
-				t.Fatal("whole-directory exchange or unchanged root not proven", err)
+			if err != nil || !os.SameFile(before, after) {
+				t.Fatal("root inode changed", err)
 			}
 			if publish {
 				data, err := os.ReadFile(filepath.Join(root, "applications/product.yaml"))

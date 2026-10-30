@@ -90,6 +90,10 @@ func printText(out io.Writer, result Result) {
 			fmt.Fprintf(out, "  %s %s %s\n", textValue(str(resource["operation"])), textValue(str(resource["kind"])), textValue(str(resource["id"])))
 		}
 	case "pull":
+		if value["recovered"] == true {
+			fmt.Fprintln(out, "Local pull recovery complete. No remote changes made.")
+			return
+		}
 		context(value)
 		files, _ := value["files"].([]string)
 		fmt.Fprintf(out, "Pulled %d managed files.\n", len(files))

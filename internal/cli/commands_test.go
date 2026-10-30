@@ -253,7 +253,12 @@ func TestPullUnsupportedGoRegexpPreservesOriginalRoot(t *testing.T) {
 			root := t.TempDir()
 			original := map[string]string{"models/old.yaml": modelYAML, "notes.txt": "unmanaged remains\n"}
 			writeFiles(t, root, original)
-			before, err := fingerprint(context.Background(), root)
+			lock, err := publicationLock(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lock.Close()
+			before, err := snapshotPull(context.Background(), root)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -288,8 +293,8 @@ func TestPullUnsupportedGoRegexpPreservesOriginalRoot(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), "Go regexp") || strings.Contains(err.Error(), "synthetic-private") {
 				t.Fatal("pull did not safely explain rejected regexp", err)
 			}
-			after, e := fingerprint(context.Background(), root)
-			if e != nil || before != after {
+			after, e := snapshotPull(context.Background(), root)
+			if e != nil || !maps.Equal(before, after) {
 				t.Fatal("failed pull changed original root", e)
 			}
 			for path, want := range original {

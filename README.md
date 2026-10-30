@@ -23,6 +23,24 @@ Candidate preparation does not publish releases, tags, packages or deployments.
 
 ## Commands
 
+Normal workflow (API selection and login are separate):
+
+```sh
+mkdir aimount-stack
+cd aimount-stack
+aimount link                    # Remember Project ID for this directory only
+aimount pull                    # Download complete configuration
+# Edit models/, tools/, agents/, applications/
+aimount plan
+aimount apply                   # Review and confirm; there is no push command
+aimount pull --force            # Replace local edits with current saved state
+```
+
+`--root` defaults to cwd without searching parents. `.aimount/` is local binding
+and recovery metadata, not the resource root. `link` downloads nothing; `pull`
+preserves that binding. Commands from outside can select the same directory with
+`--root ./aimount-stack`.
+
 ```sh
 aimount                     # Root help; no login required
 aimount auth                # Authentication subcommands
@@ -37,8 +55,8 @@ aimount unlink --root ./stack
 aimount status --root ./stack
 aimount plan --root ./stack
 aimount apply --root ./stack --prune --auto-approve
-# Run pull outside the directory being replaced:
 aimount pull --root ./stack --force
+aimount pull --root ./stack --recover # Offline recovery only, not a new download
 aimount completion zsh      # Generate an offline shell completion script
 ```
 
@@ -167,13 +185,33 @@ The mode-0600 `auth.json.lock` inode persists; never unlink it during use. Lock
 contention exits 2 and requires explicit retry. Link only writes the binding and
 its `.gitignore` entry; unlink only removes the binding.
 
-Pull holds a sibling `.ROOT.aimount-pull.lock` throughout inspection, network
-reads, staging and one native whole-directory exchange. It preserves unmanaged
-files, relative symlinks, permissions and matching environment locators. Managed
-symlink ancestors are refused. Staging validation or detected local edits abort
-before publication; unavailable native exchange leaves the root intact, without
-a per-file fallback. A hard kill may leave the sibling lock/staging: inspect
-them and recover explicitly. Arbitrary editors do not participate in CLI locks.
+Pull keeps the Stack root directory in place, including when invoked inside it.
+The persistent mode-0600 `.aimount/pull.lock` serializes pull and plan/apply across
+their complete resource-file use. Each managed file is published by atomic rename;
+the complete tree is not an atomic snapshot for external readers. Unmanaged files,
+binding, relative symlinks and matching environment locators stay in place. Managed
+symlink ancestors are refused; staging validation and detected managed-file edits abort
+before publication. Ordinary write errors attempt rollback.
+
+Change detection covers managed contents, permissions and fixed-depth discovery
+membership only. Edits to unrelated files do not abort pull; those files are never
+read or replaced for publication. The validated `next/` tree and backups share one
+prepared journal directory, activated only after validation and conflict checks.
+
+Different managed paths that resolve to the same physical file (case-only aliases
+on macOS or hard links) are refused before publication. Rename such files to an
+unambiguous temporary spelling before pulling; CLI does not guess a case-only
+rename or weaken recovery conflict checks. Resource identity still comes from the
+authored technical name, not its filename.
+
+An interrupted publication leaves `.aimount/pull` with before-state backups and a
+journal. Ordinary pull/plan/apply refuse that state. Run `aimount pull --recover`
+in the same root to restore pre-pull files, or finalize already committed cleanup;
+it runs offline without credentials and never starts a new download. Recovery
+refuses unknown content or permission changes after interruption rather than overwriting them: keep backups
+and inspect the conflict. Never delete the journal to bypass this guard. Temporary
+`.aimount/.pull-prepare-*`/`.pull-cleanup-*` leftovers are not active
+journals; inspect before manual removal. Arbitrary editors do not join CLI locks.
 
 JSON mode emits one version-1 automation envelope and never prompts. Exits:
 success `0`; validation/auth/network `1`; concurrency `2`;
@@ -195,6 +233,13 @@ Noninteractive unknown outcomes fail without another mutation.
 
 API-owned real PostgreSQL/HTTP tests use `AIMOUNT_TEST_APP_CLI` as the absolute
 built executable (`TestStackCLIRealBackend`, `TestDeviceRFCClientBackendFlow`).
+CLI process tests accept the same variable to qualify a prebuilt candidate without
+a Go compiler; without it they build the local source. For example:
+
+```sh
+AIMOUNT_TEST_APP_CLI="$PWD/dist/aimount-darwin-arm64" go test ./cmd/aimount -count=1
+```
+
 CLI fixtures do not prove server authority, transaction atomicity or single
 issuance. See [ARCHITECTURE.md](ARCHITECTURE.md), [TESTS.md](TESTS.md) and
 [REVIEW.md](REVIEW.md) for owning standards.

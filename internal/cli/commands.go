@@ -267,6 +267,23 @@ func (r *runner) run(o Options) (Result, error) {
 		return result, nil
 	}
 	bad := func(code, message string) (Result, error) { return result, commandError(code, message, 1) }
+	if o.Command == "pull" || o.Command == "plan" || o.Command == "apply" {
+		root, lock, err := openResourceRoot(o.Root)
+		if err != nil {
+			return result, err
+		}
+		defer lock.Close()
+		o.Root = root
+		if o.Recover {
+			if err := recoverPull(root); err != nil {
+				return result, err
+			}
+			return finish("pull", object{"recovered": true, "files": []string{}})
+		}
+		if err := noPendingPull(o.Root); err != nil {
+			return result, err
+		}
+	}
 	if o.Command == "unlink" {
 		e := os.Remove(filepath.Join(o.Root, ".aimount/project.json"))
 		if e != nil && !os.IsNotExist(e) {
