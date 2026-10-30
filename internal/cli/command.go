@@ -134,6 +134,7 @@ func parseOptions(args []string, env map[string]string, tty bool) (Options, erro
 	apply.Flags().BoolVar(&o.Approve, "auto-approve", false, "Apply without a confirmation prompt (does not enable prune)")
 	pull := leaf(root, "pull", "Export the Project Stack into local YAML files", "  aimount pull --root ./stack")
 	pull.Flags().BoolVar(&o.Force, "force", false, "Replace existing managed files; preserve unmanaged files")
+	pull.Flags().BoolVar(&o.Recover, "recover", false, "Recover an interrupted local pull without contacting the API")
 	root.SetHelpCommand(&cobra.Command{
 		Use: "help [command]", Short: "Help about any command",
 		RunE: func(_ *cobra.Command, args []string) error {

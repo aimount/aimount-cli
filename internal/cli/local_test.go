@@ -47,26 +47,43 @@ func TestAuthFreshMergePersistentLock(t *testing.T) {
 	}
 }
 
-func TestNativeExchangePreservesUnmanagedAndRejectsChanges(t *testing.T) {
+func TestStablePullPreservesUnmanagedAndRejectsChanges(t *testing.T) {
 	parent := t.TempDir()
 	root := filepath.Join(parent, "stack")
 	os.Mkdir(root, 0750)
 	writeFiles(t, root, map[string]string{"models/old.yaml": "old", "unknown.txt": "preserved"})
 	os.Chmod(filepath.Join(root, "unknown.txt"), 0640)
+	before, err := os.Stat(root)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Symlink("unknown.txt", filepath.Join(root, "relative-link")); err != nil {
 		t.Fatal(err)
 	}
 	prepare := func() (map[string]string, []string, error) {
 		return map[string]string{"models/new.yaml": "new\n"}, []string{"models/old.yaml"}, nil
 	}
-	if _, err := replaceRoot(context.Background(), root, prepare, func(stage string) error {
+	var staged os.FileInfo
+	if _, err := testPull(t, root, prepare, func(stage string) error {
 		b, _ := os.ReadFile(filepath.Join(stage, "models/new.yaml"))
 		if string(b) != "new\n" {
 			t.Fatal("stage missing")
 		}
+		staged, err = os.Stat(filepath.Join(stage, "models/new.yaml"))
+		if err != nil {
+			t.Fatal(err)
+		}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
+	}
+	after, err := os.Stat(root)
+	if err != nil || !os.SameFile(before, after) {
+		t.Fatal("pull replaced root inode", err)
+	}
+	published, err := os.Stat(filepath.Join(root, "models/new.yaml"))
+	if err != nil || !os.SameFile(staged, published) {
+		t.Fatal("validated new file was copied before publication", err)
 	}
 	if s, _ := os.Readlink(filepath.Join(root, "relative-link")); s != "unknown.txt" {
 		t.Fatal(s)
@@ -77,39 +94,81 @@ func TestNativeExchangePreservesUnmanagedAndRejectsChanges(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "models/old.yaml")); !os.IsNotExist(err) {
 		t.Fatal("old managed remains")
 	}
-	_, err := replaceRoot(context.Background(), root, func() (map[string]string, []string, error) {
+	_, err = testPull(t, root, func() (map[string]string, []string, error) {
 		os.WriteFile(filepath.Join(root, "unknown.txt"), []byte("edited"), 0640)
-		return map[string]string{"new.yaml": "new"}, nil, nil
+		return map[string]string{"models/new.yaml": "new"}, []string{"models/new.yaml"}, nil
 	}, nil)
-	if err == nil || !strings.Contains(err.Error(), "local root changed") {
+	if err != nil {
 		t.Fatal(err)
 	}
-	os.Symlink("models", filepath.Join(root, "linked"))
-	_, err = replaceRoot(context.Background(), root, func() (map[string]string, []string, error) {
-		return map[string]string{"linked/new.yaml": "bad"}, nil, nil
+	os.Remove(filepath.Join(root, "models/new.yaml"))
+	os.Symlink("../unknown.txt", filepath.Join(root, "models/new.yaml"))
+	_, err = testPull(t, root, func() (map[string]string, []string, error) {
+		return map[string]string{"models/new.yaml": "bad"}, nil, nil
 	}, nil)
 	if err == nil || !strings.Contains(err.Error(), "symlink") {
 		t.Fatal(err)
 	}
 }
 
+func TestPullDetectsManagedContentModeAndDiscoveryChanges(t *testing.T) {
+	for _, change := range []string{"content", "mode", "added", "removed"} {
+		t.Run(change, func(t *testing.T) {
+			root := t.TempDir()
+			writeFiles(t, root, map[string]string{"models/old.yaml": "original"})
+			_, err := testPull(t, root, func() (map[string]string, []string, error) {
+				switch change {
+				case "content":
+					os.WriteFile(filepath.Join(root, "models/old.yaml"), []byte("edited"), 0600)
+				case "mode":
+					os.Chmod(filepath.Join(root, "models/old.yaml"), 0640)
+				case "added":
+					writeFiles(t, root, map[string]string{"applications/added.yaml": "user file"})
+				case "removed":
+					os.Remove(filepath.Join(root, "models/old.yaml"))
+				}
+				return map[string]string{"models/new.yaml": "new"}, []string{"models/old.yaml"}, nil
+			}, nil)
+			if err == nil || !strings.Contains(err.Error(), "local root changed") {
+				t.Fatal("managed change was not fenced", err)
+			}
+			if _, err := os.Stat(filepath.Join(root, "models/new.yaml")); !os.IsNotExist(err) {
+				t.Fatal("new graph published over local change", err)
+			}
+		})
+	}
+}
+
 func TestPullWholeOperationLockAndRefusedStage(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "stack")
 	os.Mkdir(root, 0700)
-	writeFiles(t, root, map[string]string{"old.txt": "old"})
-	_, e := replaceRoot(context.Background(), root, func() (map[string]string, []string, error) {
-		_, e := replaceRoot(context.Background(), root, func() (map[string]string, []string, error) { t.Fatal("second prepare entered"); return nil, nil, nil }, nil)
-		if e == nil || !strings.Contains(e.Error(), "another pull owns") {
+	writeFiles(t, root, map[string]string{"models/old.yaml": "old"})
+	_, e := testPull(t, root, func() (map[string]string, []string, error) {
+		_, e := testPull(t, root, func() (map[string]string, []string, error) { t.Fatal("second prepare entered"); return nil, nil, nil }, nil)
+		if e == nil || !strings.Contains(e.Error(), "another resource command owns") {
 			t.Fatal(e)
 		}
-		return map[string]string{"new.txt": "new"}, []string{"old.txt"}, nil
+		return map[string]string{"models/new.yaml": "new"}, []string{"models/old.yaml"}, nil
 	}, func(stage string) error { return commandError("validation_failed", "candidate refused", 1) })
 	if e == nil || !strings.Contains(e.Error(), "candidate refused") {
 		t.Fatal(e)
 	}
-	if b, _ := os.ReadFile(filepath.Join(root, "old.txt")); string(b) != "old" {
+	if b, _ := os.ReadFile(filepath.Join(root, "models/old.yaml")); string(b) != "old" {
 		t.Fatal("refusal lost root")
 	}
+}
+
+func testPull(t *testing.T, root string, prepare func() (map[string]string, []string, error), validate func(string) error) (map[string]string, error) {
+	t.Helper()
+	root, lock, err := openResourceRoot(root)
+	if err != nil {
+		return nil, err
+	}
+	defer lock.Close()
+	if err := noPendingPull(root); err != nil {
+		return nil, err
+	}
+	return replaceRoot(context.Background(), root, prepare, validate)
 }
 
 func TestLocalStateSymlinkMalformedAndFreshAuthRefusal(t *testing.T) {

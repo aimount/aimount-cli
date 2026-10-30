@@ -25,6 +25,7 @@ type Options struct {
 	Args                                       []string
 	Root, API, Project, Organization, Output   string
 	NonInteractive, Prune, Force, Approve, Yes bool
+	Recover                                    bool
 }
 
 func normalizeAPI(value string) (string, error) {
@@ -136,6 +137,12 @@ func resolveOptions(o Options, explicit map[string]bool, env map[string]string, 
 	o.Root, err = filepath.Abs(o.Root)
 	if err != nil {
 		return o, errors.New("invalid root")
+	}
+	if o.Recover {
+		if o.Force {
+			return o, errors.New("--recover cannot be combined with --force")
+		}
+		return o, nil // Offline recovery needs common local options, not a remote target.
 	}
 	if explicit["api-url"] {
 		o.API, err = normalizeAPI(o.API)
