@@ -119,7 +119,7 @@ func semantic(plan object) string {
 				case "application":
 					line += " — IRREVERSIBLE Application-owned Users/conversations/Files/configuration erasure intent (physical cleanup asynchronous; shared Agents/Models/Tools preserved)"
 				case "agent":
-					line += " — IRREVERSIBLE Agent-owned private-test/files/configuration erasure intent (physical cleanup asynchronous; ordinary conversation history preserved)"
+					line += " — IRREVERSIBLE Agent-owned configuration erasure intent (physical cleanup asynchronous; ordinary conversation history preserved)"
 				}
 			}
 			lines = append(lines, line)
