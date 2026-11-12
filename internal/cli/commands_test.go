@@ -387,14 +387,17 @@ func TestExportApplicationCompleteReferencesAndLifecycle(t *testing.T) {
 func TestApplicationSemanticSetsAndAccurateErasureScope(t *testing.T) {
 	plan := object{"changes": []any{
 		object{"kind": "application", "name": "product", "operation": "DELETE", "runtime_cascade": true},
-		object{"kind": "agent", "name": "old", "operation": "DELETE", "erasure_scope": []any{"private_tests", "private_files", "configuration"}},
+		object{"kind": "agent", "name": "old", "operation": "DELETE", "erasure_scope": []any{"configuration"}},
 		object{"kind": "application", "name": "other", "operation": "UPDATE", "before": object{"agents": []any{object{"name": "z"}, object{"name": "b"}}}, "after": object{"agents": []any{object{"name": "d"}, object{"name": "a"}}}},
 	}}
 	out := semantic(plan)
-	for _, want := range []string{`agents: +["a","d"] -["b","z"]`, "IRREVERSIBLE Application-owned Users/conversations/Files", "IRREVERSIBLE Agent-owned private-test/files/configuration", "ordinary conversation history preserved", "physical cleanup asynchronous", "detach alone preserves accepted work and ordinary history"} {
+	for _, want := range []string{`agents: +["a","d"] -["b","z"]`, "IRREVERSIBLE Application-owned Users/conversations/Files", "IRREVERSIBLE Agent-owned configuration", "ordinary conversation history preserved", "physical cleanup asynchronous", "detach alone preserves accepted work and ordinary history"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %s in %s", want, out)
 		}
+	}
+	if strings.Contains(out, "private-test") {
+		t.Fatal("Agent deletion describes retired Playground data", out)
 	}
 	if strings.Index(out, "DELETE agent") > strings.Index(out, "UPDATE application") || strings.Contains(out, "default") {
 		t.Fatal("wrong semantic order or inferred responder", out)
