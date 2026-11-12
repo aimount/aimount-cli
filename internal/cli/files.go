@@ -1281,6 +1281,7 @@ func remoteApplication(s object, partial bool) object {
 		return k
 	}
 	ref := func(v any) any { return object{"name": key(obj(v)["name"])} }
+	byWire := func(a []any) { sort.Slice(a, func(i, j int) bool { return wire(a[i]) < wire(a[j]) }) }
 	set := func(v any, minimum, maximum int, read func(any) any) []any {
 		a, ok := v.([]any)
 		if !ok || len(a) < minimum || len(a) > maximum {
@@ -1294,7 +1295,7 @@ func remoteApplication(s object, partial bool) object {
 			}
 			out = append(out, r)
 		}
-		sort.Slice(out, func(i, j int) bool { return wire(out[i]) < wire(out[j]) })
+		byWire(out)
 		return out
 	}
 	keys := func(v any) []any { return set(v, 1, 100, func(x any) any { return key(x) }) }
@@ -1385,6 +1386,8 @@ func remoteApplication(s object, partial bool) object {
 					}
 					limits = append(limits, object{"agents": keys(l["agents"]), "requests": l["requests"], "period": l["period"]})
 				}
+				// Limits have no identity or order; sorting makes a reorder no change.
+				byWire(limits)
 				plan["limits"] = limits
 			}
 			return plan

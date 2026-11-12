@@ -14,20 +14,7 @@ func differences(before, after any, path string) []string {
 	}
 	a, aok := before.([]any)
 	b, bok := after.([]any)
-	if aok && bok && strings.HasSuffix(path, ".limits") {
-		// Plan limits have no identity or order; a reorder alone is no change.
-		sorted := func(a []any) string {
-			ss := []string{}
-			for _, v := range a {
-				ss = append(ss, wire(v))
-			}
-			sort.Strings(ss)
-			return strings.Join(ss, ",")
-		}
-		if sorted(a) == sorted(b) {
-			return nil
-		}
-	} else if aok && bok {
+	if aok && bok {
 		// Unordered sets: Agent Tools, local Agent Models/Storages and Plan filters.
 		if path == "tools" || strings.HasSuffix(path, ".allowed") || strings.HasSuffix(path, ".models") || strings.HasSuffix(path, ".storages") {
 			key := func(v any) string {

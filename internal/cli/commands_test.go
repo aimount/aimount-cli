@@ -395,7 +395,7 @@ func TestApplicationSemanticSetsAndAccurateErasureScope(t *testing.T) {
 		"models": object{"fast": object{"model": ref("economy")}},
 		"agents": object{"main": object{"agent": ref("main_assistant")}, "form": object{"agent": ref("form_assistant"), "models": []any{"fast"}}},
 		"plans": object{
-			"free": object{"agents": object{"main": object{"models": object{"allowed": []any{"fast"}}}}, "limits": []any{object{"agents": []any{"main"}, "requests": 1, "period": "1m"}, object{"agents": []any{"form"}, "requests": 2, "period": "1m"}}},
+			"free": object{"agents": object{"main": object{"models": object{"allowed": []any{"fast"}}}}, "limits": []any{object{"agents": []any{"form"}, "requests": 2, "period": "1m"}, object{"agents": []any{"main"}, "requests": 1, "period": "1m"}}},
 			"old":  object{},
 		},
 		"default_plan": "free",
