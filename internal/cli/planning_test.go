@@ -16,7 +16,7 @@ func TestPlanAndApplyUseServerPlannerWithoutPrefetch(t *testing.T) {
 		t.Run(command, func(t *testing.T) {
 			root := t.TempDir()
 			// Shape is valid; the missing dependency is interpreted by the API, not a preliminary export.
-			writeFiles(t, root, map[string]string{"applications/product.yaml": strings.Replace(applicationYAML, "agents: []", "agents: [{name: alias}]", 1)})
+			writeFiles(t, root, map[string]string{"applications/product.yaml": strings.Replace(applicationYAML, "models: {}\n  agents: {}", "models: {fast: {model: alias}}\n  agents: {main: {agent: alias, storages: [docs]}}", 1)})
 			plans, prefetches := 0, 0
 			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 				switch {

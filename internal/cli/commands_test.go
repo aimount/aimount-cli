@@ -157,16 +157,18 @@ func TestPullLocatorAliasIdentityAndAmbiguity(t *testing.T) {
 	}
 }
 
-func TestExportPolicyCeiling(t *testing.T) {
+func TestExportPlanToolsBelongToLocalAgent(t *testing.T) {
 	g := emptyGraph()
-	g.Models = []object{{"name": "smart", "spec": object{"nodes": []any{object{"name": "primary", "credentials": object{"mode": "none"}}}}}}
-	g.Agents = []object{{"name": "support", "spec": object{"models": []any{object{"name": "smart"}}, "tools": []any{}, "policies": []any{object{"name": "member", "models": object{"default": object{"name": "smart"}, "allowed": []any{object{"name": "smart"}}}, "tools": object{}}}}}}
+	g.Tools = []object{{"name": "lookup", "spec": object{}}, {"name": "other", "spec": object{}}}
+	g.Agents = []object{{"name": "support", "spec": object{"tools": []any{object{"name": "lookup"}}}}}
+	rule := object{"tools": object{"allowed": []any{object{"name": "lookup"}}}}
+	g.Applications = []object{{"name": "product", "spec": object{"models": object{}, "agents": object{"main": object{"agent": object{"name": "support"}}}, "plans": object{"plus": object{"agents": object{"main": rule}}}}}}
 	if e := validateExportGraph(g); e != nil {
 		t.Fatal(e)
 	}
-	obj(objects(obj(g.Agents[0]["spec"])["policies"])[0]["models"])["default"] = object{"name": "outside"}
-	if e := validateExportGraph(g); e == nil {
-		t.Fatal("policy outside effective ceiling accepted")
+	rule["tools"] = object{"allowed": []any{object{"name": "other"}}}
+	if e := validateExportGraph(g); e == nil || !strings.Contains(e.Error(), "Plan plus Tool other is not a Tool of local Agent main") {
+		t.Fatal("Plan Tool outside the local Agent accepted", e)
 	}
 }
 
@@ -175,7 +177,7 @@ func TestActualPullPreservesLocatorsThroughAliasAndDetectsChangedBindings(t *tes
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	g := emptyGraph()
 	schema := object{"type": "object", "additionalProperties": false}
-	g.Applications = []object{{"name": "product", "spec": object{"display_name": "Product", "agents": []any{}}}}
+	g.Applications = []object{{"name": "product", "spec": object{"display_name": "Product", "models": object{}, "agents": object{}}}}
 	g.Tools = []object{{"name": "lookup", "archived": true, "spec": object{"display_name": "Lookup", "enabled": true, "current_contract": "v1", "contracts": []any{object{"name": "v1", "description": "Lookup", "type": "server_webhook", "input_schema": schema, "output_schema": object{}, "webhook": object{"url_source": "env", "auth": "bearer_token", "timeout_seconds": 10}}}}}}
 	local := emptyGraph()
 	local.Tools = []object{maps.Clone(g.Tools[0])}
@@ -351,17 +353,19 @@ func TestActualPullPreservesSchemaScalarMeaning(t *testing.T) {
 }
 
 func TestExportApplicationCompleteReferencesAndLifecycle(t *testing.T) {
+	local := func(agent string) object { return object{"agent": object{"name": agent}} }
 	for _, tc := range []struct {
 		name                                     string
-		refs                                     []any
+		models, agents                           object
 		local, agentArchived, appArchived, valid bool
 	}{
-		{"empty", []any{}, false, false, false, true},
-		{"server dependency is not local", []any{object{"name": "main"}}, false, false, false, false},
-		{"export must use primary names", []any{object{"name": "old_main"}}, true, false, false, false},
-		{"duplicate Agent", []any{object{"name": "main"}, object{"name": "main"}}, true, false, false, false},
-		{"active uses archived", []any{object{"name": "main"}}, true, true, false, false},
-		{"archived retains archived", []any{object{"name": "main"}}, true, true, true, true},
+		{"empty", object{}, object{}, false, false, false, true},
+		{"server dependency is not local", object{}, object{"main": local("main")}, false, false, false, false},
+		{"Model must be local", object{"fast": object{"model": object{"name": "economy"}}}, object{}, true, false, false, false},
+		{"export must use primary names", object{}, object{"main": local("old_main")}, true, false, false, false},
+		{"one Agent under several keys", object{}, object{"main": local("main"), "form": local("main")}, true, false, false, true},
+		{"active uses archived", object{}, object{"main": local("main")}, true, true, false, false},
+		{"archived retains archived", object{}, object{"main": local("main")}, true, true, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -372,9 +376,10 @@ func TestExportApplicationCompleteReferencesAndLifecycle(t *testing.T) {
 			}
 			a := g.group("application")[0]
 			a["archived"] = tc.appArchived
-			obj(a["spec"])["agents"] = tc.refs
+			obj(a["spec"])["models"] = tc.models
+			obj(a["spec"])["agents"] = tc.agents
 			if tc.local {
-				g.Agents = []object{{"name": "main", "archived": tc.agentArchived, "spec": object{"models": []any{}, "tools": []any{}}}}
+				g.Agents = []object{{"name": "main", "archived": tc.agentArchived, "spec": object{"tools": []any{}}}}
 			}
 			err = validateExportGraph(g)
 			if (err == nil) != tc.valid {
@@ -385,25 +390,58 @@ func TestExportApplicationCompleteReferencesAndLifecycle(t *testing.T) {
 }
 
 func TestApplicationSemanticSetsAndAccurateErasureScope(t *testing.T) {
+	ref := func(name string) object { return object{"name": name} }
+	before := object{
+		"models": object{"fast": object{"model": ref("economy")}},
+		"agents": object{"main": object{"agent": ref("main_assistant")}, "form": object{"agent": ref("form_assistant"), "models": []any{"fast"}}},
+		"plans": object{
+			"free": object{"agents": object{"main": object{"models": object{"allowed": []any{"fast"}}}}, "limits": []any{object{"agents": []any{"main"}, "requests": 1, "period": "1m"}, object{"agents": []any{"form"}, "requests": 2, "period": "1m"}}},
+			"old":  object{},
+		},
+		"default_plan": "free",
+	}
+	after := object{
+		"models":        object{"fast": object{"model": ref("economy")}, "smart": object{"model": ref("reasoning")}},
+		"default_model": "fast",
+		"agents":        object{"main": object{"agent": ref("main_assistant"), "storages": []any{ref("docs")}}, "form": object{"agent": ref("form_assistant"), "models": []any{"fast"}}},
+		"plans": object{
+			"free": object{"agents": object{"main": object{"models": object{"allowed": []any{"fast"}}}}, "limits": []any{object{"agents": []any{"form"}, "requests": 2, "period": "1m"}, object{"agents": []any{"main"}, "requests": 1, "period": "1m"}}},
+		},
+	}
 	plan := object{"changes": []any{
 		object{"kind": "application", "name": "product", "operation": "DELETE", "runtime_cascade": true},
 		object{"kind": "agent", "name": "old", "operation": "DELETE", "erasure_scope": []any{"configuration"}},
-		object{"kind": "application", "name": "other", "operation": "UPDATE", "before": object{"agents": []any{object{"name": "z"}, object{"name": "b"}}}, "after": object{"agents": []any{object{"name": "d"}, object{"name": "a"}}}},
+		object{"kind": "application", "name": "other", "operation": "UPDATE", "before": before, "after": after},
 	}}
 	out := semantic(plan)
-	for _, want := range []string{`agents: +["a","d"] -["b","z"]`, "IRREVERSIBLE Application-owned Users/conversations/Files", "IRREVERSIBLE Agent-owned configuration", "ordinary conversation history preserved", "physical cleanup asynchronous", "detach alone preserves accepted work and ordinary history"} {
+	for _, want := range []string{
+		`models.smart: null → {"model":{"name":"reasoning"}}`,
+		`default_model: null → "fast"`,
+		`agents.main.storages: null → [{"name":"docs"}]`,
+		`effective agents.main.models: +["smart"] -[]`,
+		`plans.old: {} → null`,
+		"removed Plans deny tokens and queued inputs bound to them",
+		"local Agent changes apply to queued inputs at Run start",
+		"IRREVERSIBLE Application-owned Users/conversations/Files", "IRREVERSIBLE Agent-owned configuration", "ordinary conversation history preserved", "physical cleanup asynchronous",
+	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %s in %s", want, out)
 		}
 	}
-	if strings.Contains(out, "private-test") {
-		t.Fatal("Agent deletion describes retired Playground data", out)
+	for _, unwanted := range []string{"private-test", "agents.form", "limits", "Policy"} {
+		if strings.Contains(out, unwanted) {
+			t.Errorf("unexpected %s in %s", unwanted, out)
+		}
 	}
-	if strings.Index(out, "DELETE agent") > strings.Index(out, "UPDATE application") || strings.Contains(out, "default") {
-		t.Fatal("wrong semantic order or inferred responder", out)
+	if strings.Index(out, "DELETE agent") > strings.Index(out, "UPDATE application") {
+		t.Fatal("wrong semantic order", out)
 	}
-	if got := differences([]any{object{"name": "z"}, object{"name": "a"}}, []any{object{"name": "a"}, object{"name": "z"}}, "agents"); len(got) != 0 {
+	if got := differences([]any{"smart", "fast"}, []any{"fast", "smart"}, "plans.p.agents.main.models.allowed"); len(got) != 0 {
 		t.Fatal("set reorder is not a semantic change", got)
+	}
+	limit := func(n int) any { return object{"agents": []any{"main"}, "requests": n, "period": "1m"} }
+	if got := differences([]any{limit(1)}, []any{limit(2)}, "plans.p.limits"); wire(got) != wire([]string{`plans.p.limits: [{"agents":["main"],"period":"1m","requests":1}] → [{"agents":["main"],"period":"1m","requests":2}]`}) {
+		t.Fatal("changed limit not shown as rules", got)
 	}
 }
 

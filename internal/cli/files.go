@@ -258,48 +258,217 @@ func endpoint(v any, path string) {
 		fail(path, "invalid public HTTPS endpoint")
 	}
 }
-func reference(v any, path string, tool bool) object {
+func reference(v any, path string) object {
 	if s, ok := v.(string); ok {
 		technical(s, path, false)
 		return object{"name": s}
 	}
-	allowed := []string{"name"}
-	if tool {
-		allowed = append(allowed, "contract")
-	}
-	m := strictObject(v, allowed, []string{"name"}, path)
+	m := strictObject(v, []string{"name", "contract"}, []string{"name"}, path)
 	technical(m["name"], path, false)
 	if c, ok := m["contract"]; ok {
 		technical(c, path, true)
 	}
 	return maps.Clone(m)
 }
-func filter(v any, path string, models bool) object {
-	allowed := []string{"allowed", "denied"}
-	required := []string{}
-	if models {
-		allowed = append(allowed, "default")
-		required = append(required, "default")
+
+var periodRE = regexp.MustCompile(`^[1-9][0-9]{0,6}[smhd]$`)
+
+// periodValid accepts a positive s/m/h/d sliding window of at most 30 days.
+func periodValid(v any) bool {
+	s, ok := v.(string)
+	if !ok || !periodRE.MatchString(s) {
+		return false
 	}
-	f := strictObject(v, allowed, required, path)
-	if _, a := f["allowed"]; a {
-		if _, d := f["denied"]; d {
-			fail(path, "mutually exclusive filters")
+	n, _ := strconv.ParseInt(s[:len(s)-1], 10, 64)
+	return n*map[byte]int64{'s': 1, 'm': 60, 'h': 3600, 'd': 86400}[s[len(s)-1]] <= 30*86400
+}
+
+// applicationSpec strictly parses authored Application configuration into the
+// Stack shape with name-only references. Local key membership and required
+// defaults are checked here; effective default resolution and Project resource
+// existence stay with the API planner.
+func applicationSpec(v any, path string) object {
+	at := func(v any, allowed, required, field string) object {
+		if caught(func() { strictObject(v, strings.Fields(allowed), strings.Fields(required), path) }) != nil {
+			fail(path, field+": invalid or unknown fields")
 		}
+		return obj(v)
 	}
-	out := object{}
-	if models {
-		out["default"] = reference(f["default"], path, false)
+	name := func(v any, field string) string {
+		n, ok := v.(string)
+		if !ok || !nameRE.MatchString(n) {
+			fail(path, field+": expected a technical name")
+		}
+		return n
 	}
-	for _, field := range []string{"allowed", "denied"} {
-		if v, ok := f[field]; ok {
-			a := []any{}
-			for _, r := range collection(v, path, 0) {
-				a = append(a, reference(r, path, false))
+	dict := func(v any, field string) object {
+		m := obj(v)
+		if m == nil || len(m) > 100 {
+			fail(path, field+": expected a mapping of at most 100 local keys")
+		}
+		for k := range m {
+			if !nameRE.MatchString(k) {
+				fail(path, field+": invalid local key")
 			}
-			sort.Slice(a, func(i, j int) bool { return str(obj(a[i])["name"]) < str(obj(a[j])["name"]) })
-			out[field] = a
 		}
+		return m
+	}
+	set := func(v any, field string, minimum, maximum int, known object, refs bool) []any {
+		a, ok := v.([]any)
+		if !ok || len(a) < minimum || len(a) > maximum {
+			fail(path, field+": expected "+strconv.Itoa(minimum)+" to "+strconv.Itoa(maximum)+" items")
+		}
+		names := []string{}
+		for _, x := range a {
+			n := name(x, field)
+			if slices.Contains(names, n) {
+				fail(path, field+": duplicate "+n)
+			}
+			if _, ok := known[n]; known != nil && !ok {
+				fail(path, field+": unknown local key "+n)
+			}
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		out := []any{}
+		for _, n := range names {
+			if refs {
+				out = append(out, object{"name": n})
+			} else {
+				out = append(out, n)
+			}
+		}
+		return out
+	}
+	member := func(v any, field string, known object) string {
+		n := name(v, field)
+		if _, ok := known[n]; !ok {
+			fail(path, field+": unknown local key "+n)
+		}
+		return n
+	}
+	if _, ok := obj(v)["agents"].([]any); ok {
+		fail(path, "spec.agents: Application Agent reference arrays are unsupported; declare a mapping of local Agent keys")
+	}
+	s := at(v, "display_name models default_model agents default_plan plans", "display_name models agents", "spec")
+	display(s, path)
+	out := object{"display_name": s["display_name"]}
+	models := dict(s["models"], "spec.models")
+	bindings := object{}
+	for _, k := range slices.Sorted(maps.Keys(models)) {
+		b := models[k]
+		bindings[k] = object{"model": object{"name": name(at(b, "model", "model", "spec.models."+k)["model"], "spec.models."+k+".model")}}
+	}
+	out["models"] = bindings
+	if v, ok := s["default_model"]; ok {
+		out["default_model"] = member(v, "spec.default_model", models)
+	} else if len(models) >= 2 {
+		fail(path, "spec.default_model: required with two or more Models")
+	}
+	agents := dict(s["agents"], "spec.agents")
+	ceilings := map[string]object{}
+	locals := object{}
+	for _, k := range slices.Sorted(maps.Keys(agents)) {
+		v := agents[k]
+		f := "spec.agents." + k
+		a := at(v, "agent models default_model storages", "agent", f)
+		local := object{"agent": object{"name": name(a["agent"], f+".agent")}}
+		ceilings[k] = models
+		if v, ok := a["models"]; ok {
+			keys := set(v, f+".models", 1, 100, models, false)
+			local["models"] = keys
+			ceilings[k] = object{}
+			for _, m := range keys {
+				ceilings[k][str(m)] = true
+			}
+		}
+		if len(ceilings[k]) == 0 {
+			fail(path, f+": requires at least one Application Model")
+		}
+		if v, ok := a["default_model"]; ok {
+			local["default_model"] = member(v, f+".default_model", ceilings[k])
+		}
+		if v, ok := a["storages"]; ok {
+			local["storages"] = set(v, f+".storages", 0, 32, nil, true)
+		}
+		locals[k] = local
+	}
+	out["agents"] = locals
+	plans := object{}
+	if v, ok := s["plans"]; ok {
+		plans = dict(v, "spec.plans")
+		result := object{}
+		for _, pk := range slices.Sorted(maps.Keys(plans)) {
+			pv := plans[pk]
+			f := "spec.plans." + pk
+			p := at(pv, "display_name agents limits", "", f)
+			plan := object{}
+			if v, ok := p["display_name"]; ok {
+				display(object{"display_name": v}, path)
+				plan["display_name"] = v
+			}
+			if v, ok := p["agents"]; ok {
+				rules := object{}
+				given := dict(v, f+".agents")
+				for _, ak := range slices.Sorted(maps.Keys(given)) {
+					rv := given[ak]
+					rf := f + ".agents." + ak
+					ceiling, ok := ceilings[ak]
+					if !ok {
+						fail(path, rf+": unknown local Agent key")
+					}
+					r := at(rv, "input models default_model tools", "", rf)
+					rule := object{}
+					if v, ok := r["input"]; ok {
+						if _, ok := v.(bool); !ok {
+							fail(path, rf+".input: expected boolean")
+						}
+						rule["input"] = v
+					}
+					if v, ok := r["models"]; ok {
+						rule["models"] = object{"allowed": set(at(v, "allowed", "allowed", rf+".models")["allowed"], rf+".models.allowed", 1, 100, ceiling, false)}
+					}
+					if v, ok := r["default_model"]; ok {
+						rule["default_model"] = member(v, rf+".default_model", ceiling)
+					}
+					if v, ok := r["tools"]; ok {
+						rule["tools"] = object{"allowed": set(at(v, "allowed", "allowed", rf+".tools")["allowed"], rf+".tools.allowed", 0, 100, nil, true)}
+					}
+					rules[ak] = rule
+				}
+				plan["agents"] = rules
+			}
+			if v, ok := p["limits"]; ok {
+				a, ok := v.([]any)
+				if !ok || len(a) > 100 {
+					fail(path, f+".limits: expected at most 100 items")
+				}
+				limits := []any{}
+				for i, l := range a {
+					lf := f + ".limits[" + strconv.Itoa(i) + "]"
+					m := at(l, "agents requests period", "agents requests period", lf)
+					requests, ok := exactInt(m["requests"], maxSafe, 1)
+					if !ok {
+						fail(path, lf+".requests: expected a positive integer")
+					}
+					if !periodValid(m["period"]) {
+						fail(path, lf+".period: expected a positive s/m/h/d duration of at most 30d")
+					}
+					limits = append(limits, object{"agents": set(m["agents"], lf+".agents", 1, 100, agents, false), "requests": requests, "period": m["period"]})
+				}
+				plan["limits"] = limits
+			}
+			result[pk] = plan
+		}
+		out["plans"] = result
+	}
+	if v, ok := s["default_plan"]; ok {
+		out["default_plan"] = member(v, "spec.default_plan", plans)
+	} else if len(plans) >= 2 {
+		fail(path, "spec.default_plan: required with two or more Plans")
+	}
+	if len(wire(out)) > 256<<10 {
+		fail(path, "configuration exceeds 256 KiB", "invariant")
 	}
 	return out
 }
@@ -314,7 +483,7 @@ func envelope(raw, kind, path string) object {
 	}
 	technical(m["name"], path, kind == "tool_contract")
 	if v, ok := m["archived"]; ok {
-		if kind == "policy" || kind == "tool_contract" {
+		if kind == "tool_contract" {
 			fail(path, "nested archived unsupported")
 		}
 		boolean(v, path)
@@ -386,10 +555,7 @@ func discover(root string) inventory {
 		}
 	}
 	for _, dir := range []string{"tools", "agents"} {
-		parent, nested, kind := "tool", "contracts", "tool_contract"
-		if dir == "agents" {
-			parent, nested, kind = "agent", "policies", "policy"
-		}
+		parent := strings.TrimSuffix(dir, "s")
 		for _, folder := range entries(filepath.Join(root, dir)) {
 			p := filepath.Join(root, dir, folder)
 			st, e := os.Stat(p)
@@ -406,15 +572,21 @@ func discover(root string) inventory {
 				i.Managed = append(i.Managed, rel)
 				i.definitions = append(i.definitions, definition{rel, parent})
 			}
-			if dir == "agents" && slices.Contains(children, "instruction.md") {
-				i.Managed = append(i.Managed, dir+"/"+folder+"/instruction.md")
-			}
-			for _, f := range entries(filepath.Join(p, nested)) {
-				if strings.HasSuffix(f, ".yaml") {
-					files = append(files, f)
-					rel := dir + "/" + folder + "/" + nested + "/" + f
-					i.Managed = append(i.Managed, rel)
-					i.definitions = append(i.definitions, definition{rel, kind})
+			if dir == "agents" {
+				if slices.Contains(children, "policies") {
+					fail("agents/"+folder+"/policies", "Agent Policies are unsupported; remove this directory and declare Plans in applications/*.yaml", "discovery")
+				}
+				if slices.Contains(children, "instruction.md") {
+					i.Managed = append(i.Managed, dir+"/"+folder+"/instruction.md")
+				}
+			} else {
+				for _, f := range entries(filepath.Join(p, "contracts")) {
+					if strings.HasSuffix(f, ".yaml") {
+						files = append(files, f)
+						rel := dir + "/" + folder + "/contracts/" + f
+						i.Managed = append(i.Managed, rel)
+						i.definitions = append(i.definitions, definition{rel, "tool_contract"})
+					}
 				}
 			}
 			pf := packageFiles{folder, children, files}
@@ -703,61 +875,34 @@ func load(root string, env map[string]string, pull bool) (g graph, err error) {
 		for _, p := range inv.agents {
 			collect(&errs, func() {
 				if !slices.Contains(p.children, "agent.yaml") {
-					if slices.Contains(p.children, "instruction.md") || len(p.nested) > 0 {
+					if slices.Contains(p.children, "instruction.md") {
 						fail("agents/"+p.folder, "orphan Agent files", "discovery")
 					}
 					return
 				}
 				path := "agents/" + p.folder + "/agent.yaml"
 				a := parent(parsed[path], "agent", path)
-				s := strictObject(a["spec"], strings.Fields("display_name description models tools"), strings.Fields("display_name models tools"), path)
-				display(s, path)
-				for _, kind := range []string{"model", "tool"} {
-					min := 0
-					if kind == "model" {
-						min = 1
-					}
-					refs := []any{}
-					seen := map[string]bool{}
-					for _, v := range collection(s[kind+"s"], path, min) {
-						r := reference(v, path, kind == "tool")
-						name := str(r["name"])
-						if seen[name] {
-							fail(path, "duplicate reference")
-						}
-						seen[name] = true
-						refs = append(refs, r)
-					}
-					s[kind+"s"] = refs
+				if _, ok := obj(a["spec"])["models"]; ok {
+					fail(path, "spec.models is unsupported; select Models in Application local Agents")
 				}
+				s := strictObject(a["spec"], strings.Fields("display_name description tools"), strings.Fields("display_name tools"), path)
+				display(s, path)
+				refs := []any{}
+				seen := map[string]bool{}
+				for _, v := range collection(s["tools"], path, 0) {
+					r := reference(v, path)
+					name := str(r["name"])
+					if seen[name] {
+						fail(path, "duplicate reference")
+					}
+					seen[name] = true
+					refs = append(refs, r)
+				}
+				s["tools"] = refs
 				ip := "agents/" + p.folder + "/instruction.md"
 				instruction := safeText(root, filepath.Join(root, ip))
 				text(instruction, 128<<10, ip, true)
 				s["instruction"] = instruction
-				policies := []any{}
-				names := map[string]bool{}
-				for _, f := range p.nested {
-					pp := "agents/" + p.folder + "/policies/" + f
-					doc := parsed[pp]
-					pol := strictObject(doc["spec"], strings.Fields("display_name description enabled models tools"), strings.Fields("display_name models tools"), pp)
-					display(pol, pp)
-					if _, ok := pol["enabled"]; !ok {
-						pol["enabled"] = true
-					}
-					boolean(pol["enabled"], pp)
-					name := str(doc["name"])
-					if names[name] {
-						fail(pp, "duplicate Policy")
-					}
-					names[name] = true
-					pol["models"] = filter(pol["models"], pp, true)
-					pol["tools"] = filter(pol["tools"], pp, false)
-					out := maps.Clone(pol)
-					out["name"] = name
-					policies = append(policies, out)
-				}
-				collection(policies, path, 0)
-				s["policies"] = policies
 				if len(wire(s)) > 256<<10 {
 					fail(path, "configuration exceeds 256 KiB", "invariant")
 				}
@@ -768,22 +913,7 @@ func load(root string, env map[string]string, pull bool) (g graph, err error) {
 			collect(&errs, func() {
 				path := "applications/" + f
 				a := parent(parsed[path], "application", path)
-				s := strictObject(a["spec"], []string{"display_name", "agents"}, []string{"display_name", "agents"}, path)
-				display(s, path)
-				refs := []any{}
-				seen := map[string]bool{}
-				for _, v := range collection(s["agents"], path, 0) {
-					r := strictObject(v, []string{"name"}, []string{"name"}, path)
-					technical(r["name"], path, false)
-					name := str(r["name"])
-					if seen[name] {
-						fail(path, "duplicate Agent reference")
-					}
-					seen[name] = true
-					refs = append(refs, maps.Clone(r))
-				}
-				sortNamed(refs)
-				s["agents"] = refs
+				a["spec"] = applicationSpec(a["spec"], path)
 				g.Applications = append(g.Applications, a)
 			})
 		}
@@ -834,9 +964,18 @@ func sortNamed(a []any) {
 	sort.Slice(a, func(i, j int) bool { return str(obj(a[i])["name"]) < str(obj(a[j])["name"]) })
 }
 
+// keyed is a rendered local-key dictionary: always sorted, never field-ordered.
+type keyed map[string]any
+
 // YAML nodes retain exact schema tokens and canonical domain field order.
 func yamlNode(v any) *yaml.Node {
 	switch x := v.(type) {
+	case keyed:
+		n := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+		for _, k := range slices.Sorted(maps.Keys(x)) {
+			n.Content = append(n.Content, yamlNode(k), yamlNode(x[k]))
+		}
+		return n
 	case object:
 		n := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
 		for _, k := range orderedKeys(x) {
@@ -878,7 +1017,7 @@ func orderedKeys(m object) []string {
 	switch {
 	case m["kind"] != nil && m["spec"] != nil:
 		order = strings.Fields("version kind name archived spec")
-	case m["limits"] != nil:
+	case m["capabilities"] != nil:
 		order = strings.Fields("display_name description limits capabilities nodes")
 	case m["provider"] != nil:
 		order = strings.Fields("name display_name enabled route_weight provider model api base_url credentials")
@@ -892,12 +1031,18 @@ func orderedKeys(m object) []string {
 		order = strings.Fields("description type input_schema output_schema webhook")
 	case m["timeout_seconds"] != nil:
 		order = strings.Fields("url auth timeout_seconds invocation_name")
-	case m["models"] != nil:
-		order = strings.Fields("display_name description enabled models tools")
-	case m["agents"] != nil:
-		order = strings.Fields("display_name agents")
-	case m["default"] != nil || m["allowed"] != nil || m["denied"] != nil:
-		order = strings.Fields("default allowed denied")
+	case m["models"] != nil && m["agents"] != nil:
+		order = strings.Fields("display_name models default_model agents default_plan plans")
+	case m["agent"] != nil:
+		order = strings.Fields("agent models default_model storages")
+	case m["requests"] != nil:
+		order = strings.Fields("agents requests period")
+	case m["agents"] != nil || m["limits"] != nil:
+		order = strings.Fields("display_name agents limits")
+	case m["display_name"] != nil && m["tools"] != nil:
+		order = strings.Fields("display_name description tools")
+	case m["input"] != nil || m["models"] != nil || m["default_model"] != nil || m["tools"] != nil:
+		order = strings.Fields("input models default_model tools")
 	case m["contract"] != nil && m["name"] != nil:
 		order = []string{"name", "contract"}
 	}
@@ -944,13 +1089,7 @@ func render(g graph, locs map[string]string) (files map[string]string, err error
 		for _, a := range g.Applications {
 			name := str(a["name"])
 			technical(name, "export", false)
-			s := obj(a["spec"])
-			refs := []any{}
-			for _, r := range objects(s["agents"]) {
-				refs = append(refs, fields(r, "name"))
-			}
-			sortNamed(refs)
-			files["applications/"+name+".yaml"] = yamlString(authored("application", name, a["archived"], object{"display_name": s["display_name"], "agents": refs}))
+			files["applications/"+name+".yaml"] = yamlString(authored("application", name, a["archived"], authoredApplication(obj(a["spec"]))))
 		}
 		for _, m := range g.Models {
 			name := str(m["name"])
@@ -1004,10 +1143,7 @@ func render(g graph, locs map[string]string) (files map[string]string, err error
 			technical(name, "export", false)
 			s := obj(a["spec"])
 			out := fields(s, "display_name", "description")
-			models, tools := []any{}, []any{}
-			for _, r := range objects(s["models"]) {
-				models = append(models, r["name"])
-			}
+			tools := []any{}
 			for _, r := range objects(s["tools"]) {
 				if r["contract"] != nil {
 					tools = append(tools, fields(r, "name", "contract"))
@@ -1015,7 +1151,6 @@ func render(g graph, locs map[string]string) (files map[string]string, err error
 					tools = append(tools, r["name"])
 				}
 			}
-			out["models"] = models
 			out["tools"] = tools
 			files["agents/"+name+"/agent.yaml"] = yamlString(authored("agent", name, a["archived"], out))
 			instruction, ok := s["instruction"].(string)
@@ -1023,38 +1158,189 @@ func render(g graph, locs map[string]string) (files map[string]string, err error
 				fail("export", "invalid instruction", "remote")
 			}
 			files["agents/"+name+"/instruction.md"] = strings.TrimRight(strings.ReplaceAll(strings.ReplaceAll(instruction, "\r\n", "\n"), "\r", "\n"), "\n") + "\n"
-			for _, p := range objects(s["policies"]) {
-				pn := str(p["name"])
-				technical(pn, "export", false)
-				out := fields(p, "display_name", "description", "enabled")
-				for _, kind := range []string{"model", "tool"} {
-					f := obj(p[kind+"s"])
-					af := object{}
-					for _, k := range []string{"default", "allowed", "denied"} {
-						if v, ok := f[k]; ok {
-							if k == "default" {
-								af[k] = obj(v)["name"]
-							} else {
-								names := []string{}
-								for _, r := range objects(v) {
-									names = append(names, str(r["name"]))
-								}
-								sort.Strings(names)
-								ls := []any{}
-								for _, n := range names {
-									ls = append(ls, n)
-								}
-								af[k] = ls
-							}
-						}
-					}
-					out[kind+"s"] = af
-				}
-				files["agents/"+name+"/policies/"+pn+".yaml"] = yamlString(authored("policy", pn, false, out))
-			}
 		}
 	})
 	return
+}
+
+// authoredApplication renders references as names; omitted optional fields stay omitted.
+func authoredApplication(s object) object {
+	names := func(v any) []any {
+		out := []any{}
+		for _, r := range objects(v) {
+			out = append(out, r["name"])
+		}
+		return out
+	}
+	out := fields(s, "display_name", "default_model", "default_plan")
+	models := keyed{}
+	for k, b := range obj(s["models"]) {
+		models[k] = object{"model": obj(obj(b)["model"])["name"]}
+	}
+	out["models"] = models
+	agents := keyed{}
+	for k, v := range obj(s["agents"]) {
+		a := obj(v)
+		local := fields(a, "models", "default_model")
+		local["agent"] = obj(a["agent"])["name"]
+		if v, ok := a["storages"]; ok {
+			local["storages"] = names(v)
+		}
+		agents[k] = local
+	}
+	out["agents"] = agents
+	if v, ok := s["plans"]; ok {
+		plans := keyed{}
+		for k, v := range obj(v) {
+			p := obj(v)
+			plan := fields(p, "display_name", "limits")
+			if v, ok := p["agents"]; ok {
+				rules := keyed{}
+				for k, v := range obj(v) {
+					r := obj(v)
+					rule := fields(r, "input", "models", "default_model")
+					if v, ok := r["tools"]; ok {
+						rule["tools"] = object{"allowed": names(obj(v)["allowed"])}
+					}
+					rules[k] = rule
+				}
+				plan["agents"] = rules
+			}
+			plans[k] = plan
+		}
+		out["plans"] = plans
+	}
+	return out
+}
+
+// remoteApplication projects consumed Application fields, dropping IDs and additions.
+func remoteApplication(s object, partial bool) object {
+	bad := func() { fail("export", "invalid exported Application", "remote") }
+	present := func(m object, k string, required bool) bool {
+		_, ok := m[k]
+		if !ok && required {
+			bad()
+		}
+		return ok
+	}
+	key := func(v any) string {
+		k, ok := v.(string)
+		if !ok || !nameRE.MatchString(k) {
+			bad()
+		}
+		return k
+	}
+	ref := func(v any) any { return object{"name": key(obj(v)["name"])} }
+	set := func(v any, minimum, maximum int, read func(any) any) []any {
+		a, ok := v.([]any)
+		if !ok || len(a) < minimum || len(a) > maximum {
+			bad()
+		}
+		out := []any{}
+		for _, x := range a {
+			r := read(x)
+			if slices.ContainsFunc(out, func(y any) bool { return wire(y) == wire(r) }) {
+				bad()
+			}
+			out = append(out, r)
+		}
+		sort.Slice(out, func(i, j int) bool { return wire(out[i]) < wire(out[j]) })
+		return out
+	}
+	keys := func(v any) []any { return set(v, 1, 100, func(x any) any { return key(x) }) }
+	dict := func(v any, read func(object) object) object {
+		m := obj(v)
+		if m == nil || len(m) > 100 {
+			bad()
+		}
+		out := object{}
+		for k, x := range m {
+			key(k)
+			if obj(x) == nil {
+				bad()
+			}
+			out[k] = read(obj(x))
+		}
+		return out
+	}
+	displayName := func(m, out object) {
+		if v, ok := m["display_name"]; ok {
+			if caught(func() { display(object{"display_name": v}, "export") }) != nil {
+				bad()
+			}
+			out["display_name"] = v
+		}
+	}
+	out := object{}
+	present(s, "display_name", !partial)
+	displayName(s, out)
+	for _, k := range []string{"default_model", "default_plan"} {
+		if v, ok := s[k]; ok {
+			out[k] = key(v)
+		}
+	}
+	if present(s, "models", !partial) {
+		out["models"] = dict(s["models"], func(b object) object { return object{"model": ref(b["model"])} })
+	}
+	if present(s, "agents", !partial) {
+		out["agents"] = dict(s["agents"], func(a object) object {
+			local := object{"agent": ref(a["agent"])}
+			if v, ok := a["models"]; ok {
+				local["models"] = keys(v)
+			}
+			if v, ok := a["default_model"]; ok {
+				local["default_model"] = key(v)
+			}
+			if v, ok := a["storages"]; ok {
+				local["storages"] = set(v, 0, 32, ref)
+			}
+			return local
+		})
+	}
+	if v, ok := s["plans"]; ok {
+		out["plans"] = dict(v, func(p object) object {
+			plan := object{}
+			displayName(p, plan)
+			if v, ok := p["agents"]; ok {
+				plan["agents"] = dict(v, func(r object) object {
+					rule := object{}
+					if v, ok := r["input"]; ok {
+						if _, ok := v.(bool); !ok {
+							bad()
+						}
+						rule["input"] = v
+					}
+					if v, ok := r["models"]; ok {
+						rule["models"] = object{"allowed": keys(obj(v)["allowed"])}
+					}
+					if v, ok := r["default_model"]; ok {
+						rule["default_model"] = key(v)
+					}
+					if v, ok := r["tools"]; ok {
+						rule["tools"] = object{"allowed": set(obj(v)["allowed"], 0, 100, ref)}
+					}
+					return rule
+				})
+			}
+			if v, ok := p["limits"]; ok {
+				a, ok := v.([]any)
+				if !ok || len(a) > 100 {
+					bad()
+				}
+				limits := []any{}
+				for _, x := range a {
+					l := obj(x)
+					if _, ok := exactInt(l["requests"], maxSafe, 1); !ok || !periodValid(l["period"]) {
+						bad()
+					}
+					limits = append(limits, object{"agents": keys(l["agents"]), "requests": l["requests"], "period": l["period"]})
+				}
+				plan["limits"] = limits
+			}
+			return plan
+		})
+	}
+	return out
 }
 
 // readRemoteSpec validates consumed response fields and returns only safe fields.
@@ -1064,38 +1350,10 @@ func readRemoteSpec(kind string, s object, partial bool) object {
 		return nil
 	}
 	if kind == "application" {
-		out := fields(s, "display_name")
-		if v, ok := s["display_name"]; ok {
-			if err := caught(func() { display(object{"display_name": v}, "export") }); err != nil {
-				return nil
-			}
-		} else if !partial {
+		var out object
+		if caught(func() { out = remoteApplication(s, partial) }) != nil {
 			return nil
 		}
-		v, ok := s["agents"]
-		if !ok {
-			if !partial {
-				return nil
-			}
-			return out
-		}
-		refs, ok := v.([]any)
-		if !ok || len(refs) > 100 {
-			return nil
-		}
-		seen := map[string]bool{}
-		safe := []any{}
-		for _, v := range refs {
-			r := obj(v)
-			name := str(r["name"])
-			if !nameRE.MatchString(name) || seen[name] {
-				return nil
-			}
-			seen[name] = true
-			safe = append(safe, fields(r, "name"))
-		}
-		sortNamed(safe)
-		out["agents"] = safe
 		return out
 	}
 	for _, k := range []string{"display_name", "description", "instruction", "current_contract"} {
@@ -1232,12 +1490,7 @@ func readRemoteSpec(kind string, s object, partial bool) object {
 		}
 	case "agent":
 		out = fields(s, "display_name", "description", "instruction")
-		if !readArray("models", !partial, func(m object) object {
-			if !name(m) {
-				return nil
-			}
-			return fields(m, "name", "contract")
-		}) || !readArray("tools", !partial, func(m object) object {
+		if !readArray("tools", !partial, func(m object) object {
 			if !name(m) {
 				return nil
 			}
@@ -1245,30 +1498,6 @@ func readRemoteSpec(kind string, s object, partial bool) object {
 				return nil
 			}
 			return fields(m, "name", "contract")
-		}) || !readArray("policies", false, func(m object) object {
-			if !name(m) || obj(m["models"]) == nil || obj(m["tools"]) == nil {
-				return nil
-			}
-			safe := fields(m, "name", "display_name", "description", "enabled")
-			for _, field := range []string{"models", "tools"} {
-				f := obj(m[field])
-				clean := object{}
-				for _, k := range []string{"default", "allowed", "denied"} {
-					if v, ok := f[k]; ok {
-						if k == "default" {
-							clean[k] = fields(obj(v), "name")
-						} else {
-							a := []any{}
-							for _, r := range objects(v) {
-								a = append(a, fields(r, "name"))
-							}
-							clean[k] = a
-						}
-					}
-				}
-				safe[field] = clean
-			}
-			return safe
 		}) {
 			return nil
 		}
