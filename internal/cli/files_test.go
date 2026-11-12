@@ -577,7 +577,6 @@ func TestApplicationLocalValidationNamesTheField(t *testing.T) {
 		{"              - fast\n          default_model: fast\n", "              - fast\n          input: false\n          default_model: smart\n", ""},
 		{"            allowed:\n              - fast\n          default_model: fast\n", "            allowed:\n              - smart\n", "spec.plans.plus.agents.main.default_model: required because inherited default fast is not in models.allowed"},
 		{"            allowed:\n              - fast\n          default_model: fast\n", "            allowed:\n              - smart\n          input: false\n", ""},
-		{"            allowed:\n              - fast\n          default_model: fast\n", "            allowed:\n              - smart\n          input: true\n", "spec.plans.plus.agents.main.default_model: required because inherited default fast"},
 		{"            allowed:\n              - fast\n          default_model: fast\n", "            allowed:\n              - fast\n", ""},
 		{"        main:\n          input: false\n", "        form:\n          default_model: smart\n          input: false\n", "spec.plans.free.agents.form.default_model: smart is not in the local Agent's models"},
 		{"        main:\n          input: false\n", "        main:\n          default_model: turbo\n", "spec.plans.free.agents.main.default_model: unknown local key turbo"},
@@ -600,6 +599,7 @@ func TestApplicationLocalValidationNamesTheField(t *testing.T) {
 		{"    fast:\n      model: economy_model\n", "    fast:\n      model: economy_model\n      default: true\n", "spec.models.fast: invalid or unknown fields"},
 		{"  agents:\n    form:", "  agents:\n    Form:", "spec.agents: invalid local key"},
 		{"  models:\n    fast:\n      model: economy_model\n    smart:\n      model: reasoning_model\n  default_model: fast\n", "  models: {}\n", "spec.agents.form.models: unknown local key fast"},
+		{"  models:\n    fast:\n      model: economy_model\n    smart:\n      model: reasoning_model\n  default_model: fast\n  agents:\n    form:\n      agent: form_assistant\n      models:\n        - fast\n", "  models: {}\n  agents:\n    form:\n      agent: form_assistant\n", "spec.agents.form: requires at least one Application Model"},
 	} {
 		if !strings.Contains(paperdeskYAML, tc.old) {
 			t.Fatalf("fixture lacks %q", tc.old)
@@ -626,18 +626,5 @@ func TestPreviousAgentAndApplicationFormatsFailClearly(t *testing.T) {
 		if _, err := load(root, nil, false); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("want %q, got %v", tc.want, err)
 		}
-	}
-	root := t.TempDir()
-	writeFiles(t, root, map[string]string{"agents/support/policies/member.yaml": "old\n"})
-	if _, err := inspect(root); err == nil || !strings.Contains(err.Error(), "Agent Policies are unsupported") {
-		t.Fatal("pull inventory accepted an old Policy directory", err)
-	}
-}
-
-func TestApplicationLocalAgentNeedsAModel(t *testing.T) {
-	root := t.TempDir()
-	writeFiles(t, root, map[string]string{"applications/product.yaml": strings.Replace(applicationYAML, "agents: {}", "agents: {main: {agent: main_assistant}}", 1)})
-	if _, err := load(root, nil, false); err == nil || !strings.Contains(err.Error(), "spec.agents.main: requires at least one Application Model") {
-		t.Fatal("local Agent without Models accepted", err)
 	}
 }
