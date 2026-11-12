@@ -15,7 +15,8 @@ func differences(before, after any, path string) []string {
 	a, aok := before.([]any)
 	b, bok := after.([]any)
 	if aok && bok {
-		if path == "agents" || path == "tools" || strings.HasSuffix(path, ".allowed") || strings.HasSuffix(path, ".denied") {
+		// Unordered sets: Agent Tools, local Agent Models/Storages and Plan filters.
+		if path == "tools" || strings.HasSuffix(path, ".allowed") || strings.HasSuffix(path, ".models") || strings.HasSuffix(path, ".storages") {
 			key := func(v any) string {
 				if s, ok := v.(string); ok {
 					return s
@@ -105,7 +106,7 @@ func semantic(plan object) string {
 		return str(a["operation"]) < str(b["operation"])
 	})
 	lines := []string{}
-	for _, group := range []struct{ kind, field, label string }{{"model", "nodes", "Node"}, {"tool", "contracts", "Tool Contract"}, {"agent", "policies", "Policy"}, {"application", "", ""}} {
+	for _, group := range []struct{ kind, field, label string }{{"model", "nodes", "Node"}, {"tool", "contracts", "Tool Contract"}, {"agent", "", ""}, {"application", "", ""}} {
 		changes := []object{}
 		for _, c := range ordered {
 			if c["kind"] == group.kind && c["operation"] != "ROTATE" {
@@ -139,14 +140,30 @@ func semantic(plan object) string {
 				names[k] = true
 			}
 			for _, k := range slices.Sorted(maps.Keys(names)) {
-				if k != group.field {
-					for _, line := range differences(before[k], after[k], k) {
-						lines = append(lines, "  "+line)
-						if c["kind"] == "application" && c["operation"] == "UPDATE" && k == "agents" {
-							lines = append(lines, "  connection changes affect new inputs; detach alone preserves accepted work and ordinary history")
+				if k == group.field {
+					continue
+				}
+				changed := differences(before[k], after[k], k)
+				for _, line := range changed {
+					lines = append(lines, "  "+line)
+				}
+				if len(changed) == 0 || c["kind"] != "application" || c["operation"] != "UPDATE" {
+					continue
+				}
+				switch k {
+				case "agents":
+					lines = append(lines, "  local Agent changes apply to queued inputs at Run start; removed keys stop execution and keep Sessions/history")
+				case "plans":
+					for p := range obj(before[k]) {
+						if _, ok := obj(after[k])[p]; !ok {
+							lines = append(lines, "  removed Plans deny tokens and queued inputs bound to them; Users/Sessions/accounting are kept")
+							break
 						}
 					}
 				}
+			}
+			if c["kind"] == "application" && c["operation"] == "UPDATE" {
+				lines = append(lines, inheritedModels(before, after)...)
 			}
 		}
 		type member struct {
@@ -217,4 +234,32 @@ func semantic(plan object) string {
 		lines = append(lines, "credential "+literal(v.r["action"])+" "+literal(v.c["kind"])+" "+literal(v.c["name"])+"/"+literal(v.r["target"])+" (expected version "+literal(v.r["expected_version"])+")")
 	}
 	return strings.Join(lines, "\n") + "\n"
+}
+
+// inheritedModels shows effective Model set changes of local Agents that inherit spec.models.
+func inheritedModels(before, after object) []string {
+	if before["models"] == nil || after["models"] == nil {
+		return nil
+	}
+	effective := func(spec, local object) []any {
+		if v, ok := local["models"]; ok {
+			return list(v)
+		}
+		keys := []any{}
+		for _, k := range slices.Sorted(maps.Keys(obj(spec["models"]))) {
+			keys = append(keys, k)
+		}
+		return keys
+	}
+	lines := []string{}
+	for _, k := range slices.Sorted(maps.Keys(obj(after["agents"]))) {
+		left, right := obj(obj(before["agents"])[k]), obj(obj(after["agents"])[k])
+		if left == nil || right == nil || left["models"] != nil && right["models"] != nil {
+			continue
+		}
+		for _, line := range differences(effective(before, left), effective(after, right), "agents."+k+".models") {
+			lines = append(lines, "  effective "+line)
+		}
+	}
+	return lines
 }

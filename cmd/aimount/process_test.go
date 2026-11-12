@@ -102,7 +102,7 @@ func TestExecutablePlannerErrorsPreserveExitCategories(t *testing.T) {
 				if err := os.MkdirAll(filepath.Join(root, "applications"), 0700); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.WriteFile(filepath.Join(root, "applications/product.yaml"), []byte("version: 1\nkind: application\nname: product\nspec:\n  display_name: Product\n  agents: []\n"), 0600); err != nil {
+				if err := os.WriteFile(filepath.Join(root, "applications/product.yaml"), []byte("version: 1\nkind: application\nname: product\nspec:\n  display_name: Product\n  models: {}\n  agents: {}\n"), 0600); err != nil {
 					t.Fatal(err)
 				}
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -225,7 +225,7 @@ func TestExecutableManualExactApplyRetry(t *testing.T) {
 	os.WriteFile(filepath.Join(root, "models/smart.yaml"), []byte("version: 1\nkind: model\nname: smart\nspec:\n  display_name: Smart\n  limits: {context_window_tokens: 8192, max_output_tokens: 1024}\n  capabilities: {input_modalities: [text], output_modalities: [text], tool_calling: false}\n  nodes:\n    - name: primary\n      display_name: Primary\n      provider: openai_compatible\n      api: responses\n      base_url: https://provider.example/v1\n      model: test\n      credentials: {none: {}}\n"), 0600)
 	os.MkdirAll(filepath.Join(root, "applications"), 0700)
 	appPath := filepath.Join(root, "applications/renamed.yaml")
-	os.WriteFile(appPath, []byte("version: 1\nkind: application\nname: product\nspec:\n  display_name: Reviewed application\n  agents: []\n"), 0600)
+	os.WriteFile(appPath, []byte("version: 1\nkind: application\nname: product\nspec:\n  display_name: Reviewed application\n  models: {}\n  agents: {}\n"), 0600)
 	plans := 0
 	type captured struct{ path, body, key string }
 	writes := []captured{}
@@ -240,10 +240,10 @@ func TestExecutableManualExactApplyRetry(t *testing.T) {
 		case strings.HasSuffix(r.URL.Path, "/stack/plan"):
 			plans++
 			body, _ := io.ReadAll(r.Body)
-			if !strings.Contains(string(body), `"applications":[{"archived":false,"name":"product","spec":{"agents":[],"display_name":"Reviewed application"}}]`) {
+			if !strings.Contains(string(body), `"applications":[{"archived":false,"name":"product","spec":{"agents":{},"display_name":"Reviewed application","models":{}}}]`) {
 				t.Error("plan lost complete Application graph")
 			}
-			io.WriteString(w, `{"version":1,"read_set":{"resources":[{"kind":"application","id":"app_0123456789ABCDEF","etag":"original-application-etag"}],"bindings":[{"kind":"application","name":"product","id":"app_0123456789ABCDEF"}],"membership_incarnation":"00000000-0000-4000-8000-000000000001","membership_version":1,"membership_access_epoch":0,"project_lifecycle_epoch":0,"credentials":[],"future_secret":"synthetic-private"},"changes":[{"kind":"model","name":"smart","operation":"CREATE"},{"kind":"application","name":"product","operation":"UPDATE","before":{"display_name":"Saved application","agents":[]},"after":{"display_name":"Reviewed application","agents":[]}}]}`)
+			io.WriteString(w, `{"version":1,"read_set":{"resources":[{"kind":"application","id":"app_0123456789ABCDEF","etag":"original-application-etag"}],"bindings":[{"kind":"application","name":"product","id":"app_0123456789ABCDEF"}],"membership_incarnation":"00000000-0000-4000-8000-000000000001","membership_version":1,"membership_access_epoch":0,"project_lifecycle_epoch":0,"credentials":[],"future_secret":"synthetic-private"},"changes":[{"kind":"model","name":"smart","operation":"CREATE"},{"kind":"application","name":"product","operation":"UPDATE","before":{"display_name":"Saved application","models":{},"agents":{}},"after":{"display_name":"Reviewed application","models":{},"agents":{}}}]}`)
 		case strings.HasSuffix(r.URL.Path, "/stack/apply"):
 			b, _ := io.ReadAll(r.Body)
 			writes = append(writes, captured{r.URL.Path, string(b), r.Header.Get("Idempotency-Key")})
@@ -255,7 +255,7 @@ func TestExecutableManualExactApplyRetry(t *testing.T) {
 				io.WriteString(w, `{"version":1,"changed":true,"resources":[{"kind":"application","id":"app_0123456789ABCDEF","etag":"new-etag","version":2,"revision":2,"operation":"UPDATE","changed":true}]}`)
 			}
 		case strings.HasSuffix(r.URL.Path, "/stack"):
-			io.WriteString(w, `{"version":1,"models":[],"tools":[],"agents":[],"applications":[{"name":"product","spec":{"display_name":"Saved application","agents":[]}}]}`)
+			io.WriteString(w, `{"version":1,"models":[],"tools":[],"agents":[],"applications":[{"name":"product","spec":{"display_name":"Saved application","models":{},"agents":{}}}]}`)
 		default:
 			w.WriteHeader(404)
 		}
@@ -316,7 +316,7 @@ func TestExecutablePullInsideRootKeepsParentShell(t *testing.T) {
 		case "/v0/projects/prj_0123456789ABCDEF":
 			io.WriteString(w, `{"id":"prj_0123456789ABCDEF","status":"active","display_name":"Safe"}`)
 		case "/v0/projects/prj_0123456789ABCDEF/stack":
-			io.WriteString(w, `{"version":1,"models":[],"tools":[],"agents":[],"applications":[{"name":"product","spec":{"display_name":"Product","agents":[]}}]}`)
+			io.WriteString(w, `{"version":1,"models":[],"tools":[],"agents":[],"applications":[{"name":"product","spec":{"display_name":"Product","models":{},"agents":{}}}]}`)
 		case "/v0/projects/prj_0123456789ABCDEF/stack/plan":
 			io.WriteString(w, `{"version":1,"read_set":{"resources":[],"bindings":[],"credentials":[],"membership_incarnation":"synthetic","membership_version":1,"membership_access_epoch":0,"project_lifecycle_epoch":0},"changes":[]}`)
 		case "/v0/projects/prj_0123456789ABCDEF/stack/apply":
@@ -347,7 +347,7 @@ func TestExecutablePullInsideRootKeepsParentShell(t *testing.T) {
 
 func TestExecutableApplicationPullAtomicPublication(t *testing.T) {
 	bin := buildBinary(t)
-	for _, mode := range []string{"canonical", "connected", "missing-agent", "duplicate-agent", "managed-symlink", "local-edit"} {
+	for _, mode := range []string{"canonical", "connected", "missing-agent", "previous-format", "managed-symlink", "local-edit"} {
 		t.Run(mode, func(t *testing.T) {
 			publish := mode == "canonical" || mode == "connected" || mode == "local-edit"
 			home := t.TempDir()
@@ -355,7 +355,7 @@ func TestExecutableApplicationPullAtomicPublication(t *testing.T) {
 			if err := os.MkdirAll(filepath.Join(root, "applications/examples"), 0750); err != nil {
 				t.Fatal(err)
 			}
-			original := "version: 1\nkind: application\nname: old\nspec: {display_name: Old, agents: []}\n"
+			original := "version: 1\nkind: application\nname: old\nspec: {display_name: Old, models: {}, agents: {}}\n"
 			if err := os.WriteFile(filepath.Join(root, "applications/old.yaml"), []byte(original), 0600); err != nil {
 				t.Fatal(err)
 			}
@@ -383,24 +383,24 @@ func TestExecutableApplicationPullAtomicPublication(t *testing.T) {
 				case "/v0/projects/prj_0123456789ABCDEF":
 					io.WriteString(w, `{"id":"prj_0123456789ABCDEF","status":"active","display_name":"Safe"}`)
 				case "/v0/projects/prj_0123456789ABCDEF/stack":
-					refs, models, agents := "[]", "[]", "[]"
+					app, models, agents := `"models":{},"agents":{}`, "[]", "[]"
 					if mode == "connected" {
-						refs = `[{"name":"zulu"},{"name":"alpha"}]`
+						app = `"models":{"fast":{"model":{"id":"mdl_0123456789ABCDEF","name":"smart"}}},"agents":{"main":{"agent":{"id":"agt_0123456789ABCDEF","name":"zulu"}},"helper":{"agent":{"name":"zulu"}},"form":{"agent":{"name":"alpha"},"models":["fast"],"storages":[{"id":"sto_0123456789ABCDEF","name":"docs"}]}},"plans":{"plus":{"display_name":"Plus","agents":{"main":{"input":false}},"limits":[{"agents":["helper","form"],"requests":5,"period":"1h"}],"users":["never-output"]}}`
 						models = `[{"name":"smart","spec":{"display_name":"Smart","limits":{"context_window_tokens":8192,"max_output_tokens":1024},"capabilities":{"input_modalities":["text"],"output_modalities":["text"],"tool_calling":false},"nodes":[{"name":"primary","display_name":"Primary","provider":"openai_compatible","api":"responses","base_url":"https://provider.example/v1","model":"test","credentials":{"mode":"none"}}]}}]`
-						agents = `[{"name":"zulu","spec":{"display_name":"Zulu","instruction":"Help","models":[{"name":"smart"}],"tools":[],"policies":[]}},{"name":"alpha","spec":{"display_name":"Alpha","instruction":"Help","models":[{"name":"smart"}],"tools":[],"policies":[]}}]`
+						agents = `[{"name":"zulu","spec":{"display_name":"Zulu","instruction":"Help","tools":[]}},{"name":"alpha","spec":{"display_name":"Alpha","instruction":"Help","tools":[]}}]`
 					}
 					if mode == "missing-agent" {
-						refs = `[{"name":"missing"}]`
+						app = `"models":{},"agents":{"main":{"agent":{"name":"missing"}}}`
 					}
-					if mode == "duplicate-agent" {
-						refs = `[{"name":"missing"},{"name":"missing"}]`
+					if mode == "previous-format" {
+						app = `"agents":[{"name":"missing"}]`
 					}
 					if mode == "local-edit" {
 						if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("edited during pull\n"), 0640); err != nil {
 							t.Error(err)
 						}
 					}
-					io.WriteString(w, `{"version":1,"models":`+models+`,"tools":[],"agents":`+agents+`,"applications":[{"name":"product","archived":true,"spec":{"display_name":"Product","agents":`+refs+`},"users":["never-output"],"runtime_key":"never-output"}]}`)
+					io.WriteString(w, `{"version":1,"models":`+models+`,"tools":[],"agents":`+agents+`,"applications":[{"name":"product","archived":true,"spec":{"display_name":"Product",`+app+`},"users":["never-output"],"runtime_key":"never-output"}]}`)
 				default:
 					t.Error("unexpected request", r.URL.Path)
 					w.WriteHeader(404)
@@ -421,9 +421,9 @@ func TestExecutableApplicationPullAtomicPublication(t *testing.T) {
 			}
 			if publish {
 				data, err := os.ReadFile(filepath.Join(root, "applications/product.yaml"))
-				want := "version: 1\nkind: application\nname: product\narchived: true\nspec:\n  display_name: Product\n  agents: []\n"
+				want := "version: 1\nkind: application\nname: product\narchived: true\nspec:\n  display_name: Product\n  models: {}\n  agents: {}\n"
 				if mode == "connected" {
-					want = strings.Replace(want, "agents: []", "agents:\n    - name: alpha\n    - name: zulu", 1)
+					want = "version: 1\nkind: application\nname: product\narchived: true\nspec:\n  display_name: Product\n  models:\n    fast:\n      model: smart\n  agents:\n    form:\n      agent: alpha\n      models:\n        - fast\n      storages:\n        - docs\n    helper:\n      agent: zulu\n    main:\n      agent: zulu\n  plans:\n    plus:\n      display_name: Plus\n      agents:\n        main:\n          input: false\n      limits:\n        - agents:\n            - form\n            - helper\n          requests: 5\n          period: 1h\n"
 				}
 				if err != nil || string(data) != want {
 					t.Fatal("noncanonical Application published", err, string(data))

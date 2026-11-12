@@ -62,7 +62,7 @@ func TestStrictYAMLAndExactNumbers(t *testing.T) {
 
 func TestCompleteLoadBeforeSecretsAndRoundTrip(t *testing.T) {
 	root := t.TempDir()
-	writeFiles(t, root, map[string]string{"models/smart.yaml": modelYAML, "agents/support/agent.yaml": "version: 1\nkind: agent\nname: support\nspec:\n  display_name: Support\n  models: [smart]\n  tools: []\n"})
+	writeFiles(t, root, map[string]string{"models/smart.yaml": modelYAML, "agents/support/agent.yaml": "version: 1\nkind: agent\nname: support\nspec:\n  display_name: Support\n  tools: []\n"})
 	if _, err := load(root, map[string]string{"OPENAI_TEST": ""}, false); err == nil || !strings.Contains(err.Error(), "instruction.md") {
 		t.Fatal("missing instruction accepted", err)
 	}
@@ -370,14 +370,134 @@ kind: application
 name: product
 spec:
   display_name: Product assistant
-  agents: []
+  models: {}
+  agents: {}
+`
+
+// paperdeskYAML is the canonical pull form of paperdeskAuthored: dictionaries
+// and sets sorted, omitted local Agent models/default_model kept omitted.
+const paperdeskYAML = `version: 1
+kind: application
+name: paperdesk
+spec:
+  display_name: Paperdesk Assistant
+  models:
+    fast:
+      model: economy_model
+    smart:
+      model: reasoning_model
+  default_model: fast
+  agents:
+    form:
+      agent: form_assistant
+      models:
+        - fast
+      storages:
+        - document_templates
+    main:
+      agent: main_assistant
+      storages:
+        - document_templates
+        - product_documentation
+    text:
+      agent: form_assistant
+      models:
+        - fast
+        - smart
+      default_model: fast
+      storages: []
+  default_plan: free
+  plans:
+    free:
+      agents:
+        main:
+          input: false
+      limits:
+        - agents:
+            - form
+            - text
+          requests: 10
+          period: 1m
+    plus:
+      display_name: Plus
+      agents:
+        main:
+          models:
+            allowed:
+              - fast
+          default_model: fast
+          tools:
+            allowed:
+              - documents_read
+      limits:
+        - agents:
+            - main
+          requests: 10
+          period: 1m
+        - agents:
+            - form
+            - text
+          requests: 100
+          period: 1m
+    pro:
+      agents:
+        main:
+          default_model: smart
+          tools:
+            allowed: []
+      limits: []
+`
+
+const paperdeskAuthored = `version: 1
+kind: application
+name: paperdesk
+spec:
+  display_name: Paperdesk Assistant
+  models:
+    smart: {model: reasoning_model}
+    fast: {model: economy_model}
+  default_model: fast
+  agents:
+    main:
+      agent: main_assistant
+      storages: [product_documentation, document_templates]
+    form:
+      agent: form_assistant
+      models: [fast]
+      storages: [document_templates]
+    text:
+      agent: form_assistant
+      models: [smart, fast]
+      default_model: fast
+      storages: []
+  default_plan: free
+  plans:
+    free:
+      agents:
+        main: {input: false}
+      limits:
+        - {agents: [text, form], requests: 10, period: 1m}
+    plus:
+      display_name: Plus
+      agents:
+        main:
+          default_model: fast
+          models: {allowed: [fast]}
+          tools: {allowed: [documents_read]}
+      limits:
+        - {agents: [main], requests: 10, period: 1m}
+        - {agents: [form, text], requests: 100, period: 1m}
+    pro:
+      agents:
+        main: {default_model: smart, tools: {allowed: []}}
+      limits: []
 `
 
 func TestApplicationFilesStrictFixedDepthAndCanonical(t *testing.T) {
 	root := t.TempDir()
 	writeFiles(t, root, map[string]string{"applications/renamed.yaml": applicationYAML, "applications/example/deeper.yaml": "broken", "applications/ignored.yml": "broken"})
 	g, err := load(root, nil, false)
-	if err != nil || !strings.Contains(wire(g), `"applications":[{"archived":false,"name":"product","spec":{"agents":[],"display_name":"Product assistant"}}]`) {
+	if err != nil || !strings.Contains(wire(g), `"applications":[{"archived":false,"name":"product","spec":{"agents":{},"display_name":"Product assistant","models":{}}}]`) {
 		t.Fatal("empty Application not discovered", err, wire(g))
 	}
 	i, err := inspect(root)
@@ -399,13 +519,15 @@ func TestApplicationFilesStrictFixedDepthAndCanonical(t *testing.T) {
 		t.Fatal("archived lifecycle lost", files, err)
 	}
 	for _, raw := range []string{
-		strings.Replace(applicationYAML, "  agents: []\n", "", 1),
-		strings.Replace(applicationYAML, "agents: []", "agents: null", 1),
-		strings.Replace(applicationYAML, "agents: []", "agents: [main]", 1),
-		strings.Replace(applicationYAML, "agents: []", "agents: [{name: main, id: agt_0123456789ABCDEF}]", 1),
-		strings.Replace(applicationYAML, "agents: []", "agents: [{name: main}, {name: main}]", 1),
-		strings.Replace(applicationYAML, "agents: []", "agents: []\n  description: unsupported", 1),
-		strings.Replace(applicationYAML, "agents: []", "agents: []\n  archived: true", 1),
+		strings.Replace(applicationYAML, "  agents: {}\n", "", 1),
+		strings.Replace(applicationYAML, "  models: {}\n", "", 1),
+		strings.Replace(applicationYAML, "agents: {}", "agents: null", 1),
+		strings.Replace(applicationYAML, "agents: {}", "agents: {main: {agent: main, id: agt_0123456789ABCDEF}}", 1),
+		strings.Replace(applicationYAML, "agents: {}", "agents: {Main: {agent: main}}", 1),
+		strings.Replace(applicationYAML, "agents: {}", "agents: {main: {agent: {name: main}}}", 1),
+		strings.Replace(applicationYAML, "agents: {}", "agents: {}\n  description: unsupported", 1),
+		strings.Replace(applicationYAML, "agents: {}", "agents: {}\n  type: assistant", 1),
+		strings.Replace(applicationYAML, "agents: {}", "agents: {}\n  archived: true", 1),
 		strings.Replace(applicationYAML, "spec:", "archived: 1\nspec:", 1),
 		strings.Replace(applicationYAML, "name: product", "name: Product", 1),
 		strings.Replace(applicationYAML, "display_name: Product assistant", "display_name: ' '", 1),
@@ -421,17 +543,88 @@ func TestApplicationFilesStrictFixedDepthAndCanonical(t *testing.T) {
 	}
 }
 
-func TestApplicationCanonicalConnectionNamesAreAnUnorderedSet(t *testing.T) {
+func TestApplicationLocalKeysRoundTripCanonically(t *testing.T) {
 	root := t.TempDir()
-	writeFiles(t, root, map[string]string{"applications/product.yaml": strings.Replace(applicationYAML, "agents: []", "agents: [{name: zulu}, {name: alpha}]", 1)})
+	writeFiles(t, root, map[string]string{"applications/paperdesk.yaml": paperdeskAuthored})
 	g, err := load(root, nil, false)
-	if err != nil || wire(obj(g.Applications[0]["spec"])["agents"]) != `[{"name":"alpha"},{"name":"zulu"}]` {
-		t.Fatal("normalized Application connections are not sorted", err)
+	if err != nil {
+		t.Fatal(err)
 	}
-	obj(g.Applications[0]["spec"])["agents"] = []any{object{"name": "zulu", "id": "agt_0000000000000002"}, object{"name": "alpha", "id": "agt_0000000000000001"}}
+	main := wire(obj(obj(obj(g.Applications[0]["spec"])["agents"])["main"]))
+	if main != `{"agent":{"name":"main_assistant"},"storages":[{"name":"document_templates"},{"name":"product_documentation"}]}` {
+		t.Fatal("inheriting local Agent gained models/default or lost name-only refs", main)
+	}
 	files, err := render(g, nil)
-	want := strings.Replace(applicationYAML, "agents: []", "agents:\n    - name: alpha\n    - name: zulu", 1)
-	if err != nil || files["applications/product.yaml"] != want {
-		t.Fatal("portable canonical connections changed", err, files)
+	if err != nil || files["applications/paperdesk.yaml"] != paperdeskYAML {
+		t.Fatal("noncanonical Application", err, files["applications/paperdesk.yaml"])
+	}
+	writeFiles(t, root, map[string]string{"applications/paperdesk.yaml": paperdeskYAML})
+	again, err := load(root, nil, false)
+	if err != nil || wire(again) != wire(g) {
+		t.Fatal("canonical Application did not round-trip", err)
+	}
+}
+
+func TestApplicationLocalValidationNamesTheField(t *testing.T) {
+	root := t.TempDir()
+	for _, tc := range []struct{ old, new, want string }{
+		// Effective defaults resolve exactly like the API domain.
+		{"      default_model: fast\n      storages: []\n", "      storages: []\n", ""},
+		{"    smart:\n      model: reasoning_model\n  default_model: fast\n  agents:\n    form:\n      agent: form_assistant\n      models:\n        - fast\n", "    smart:\n      model: reasoning_model\n    turbo:\n      model: turbo_model\n  default_model: turbo\n  agents:\n    form:\n      agent: form_assistant\n      models:\n        - fast\n        - smart\n", "spec.agents.form.default_model: required because spec.default_model is not in this local Agent's models"},
+		{"    smart:\n      model: reasoning_model\n  default_model: fast\n", "    smart:\n      model: reasoning_model\n    turbo:\n      model: turbo_model\n  default_model: turbo\n", ""},
+		{"      models:\n        - fast\n      storages:\n        - document_templates\n", "      models:\n        - fast\n      default_model: smart\n", "spec.agents.form.default_model: smart is not in the local Agent's models"},
+		{"              - fast\n          default_model: fast\n", "              - fast\n          default_model: smart\n", "spec.plans.plus.agents.main.default_model: smart is not in models.allowed"},
+		{"              - fast\n          default_model: fast\n", "              - fast\n          input: false\n          default_model: smart\n", ""},
+		{"            allowed:\n              - fast\n          default_model: fast\n", "            allowed:\n              - smart\n", "spec.plans.plus.agents.main.default_model: required because inherited default fast is not in models.allowed"},
+		{"            allowed:\n              - fast\n          default_model: fast\n", "            allowed:\n              - smart\n          input: false\n", ""},
+		{"            allowed:\n              - fast\n          default_model: fast\n", "            allowed:\n              - fast\n", ""},
+		{"        main:\n          input: false\n", "        form:\n          default_model: smart\n          input: false\n", "spec.plans.free.agents.form.default_model: smart is not in the local Agent's models"},
+		{"        main:\n          input: false\n", "        main:\n          default_model: turbo\n", "spec.plans.free.agents.main.default_model: unknown local key turbo"},
+		{"        main:\n          input: false\n", "        ghost:\n          input: false\n", "spec.plans.free.agents.ghost: unknown local Agent key"},
+		{"  default_model: fast\n  agents:", "  agents:", "spec.default_model: required with two or more Models"},
+		{"  default_plan: free\n", "", "spec.default_plan: required with two or more Plans"},
+		{"  default_plan: free\n", "  default_plan: gold\n", "spec.default_plan: unknown local key gold"},
+		{"      models:\n        - fast\n      storages:\n        - document_templates\n", "      models:\n        - turbo\n", "spec.agents.form.models: unknown local key turbo"},
+		{"      models:\n        - fast\n      storages:\n        - document_templates\n", "      models: []\n", "spec.agents.form.models: expected 1 to 100 items"},
+		{"      default_model: fast\n      storages: []\n", "      default_model: turbo\n", "spec.agents.text.default_model: unknown local key turbo"},
+		{"        - document_templates\n        - product_documentation\n", "        - document_templates\n        - document_templates\n", "spec.agents.main.storages: duplicate document_templates"},
+		{"            allowed:\n              - fast\n", "            allowed: []\n", "spec.plans.plus.agents.main.models.allowed: expected 1 to 100 items"},
+		{"        main:\n          input: false\n", "        form:\n          models: {allowed: [smart]}\n", "spec.plans.free.agents.form.models.allowed: unknown local key smart"},
+		{"        main:\n          input: false\n", "        main:\n          input: 0\n", "spec.plans.free.agents.main.input: expected boolean"},
+		{"        - agents:\n            - main\n", "        - agents:\n            - ghost\n", "spec.plans.plus.limits[0].agents: unknown local key ghost"},
+		{"          requests: 10\n          period: 1m\n    plus:", "          requests: 0\n          period: 1m\n    plus:", "spec.plans.free.limits[0].requests: expected a positive integer"},
+		{"          requests: 10\n          period: 1m\n    plus:", "          requests: 10\n          period: 31d\n    plus:", "spec.plans.free.limits[0].period"},
+		{"          requests: 10\n          period: 1m\n    plus:", "          requests: 10\n          period: 1w\n    plus:", "spec.plans.free.limits[0].period"},
+		{"    pro:\n", "    pro:\n      archived: true\n", "spec.plans.pro: invalid or unknown fields"},
+		{"    fast:\n      model: economy_model\n", "    fast:\n      model: economy_model\n      default: true\n", "spec.models.fast: invalid or unknown fields"},
+		{"  agents:\n    form:", "  agents:\n    Form:", "spec.agents: invalid local key"},
+		{"  models:\n    fast:\n      model: economy_model\n    smart:\n      model: reasoning_model\n  default_model: fast\n", "  models: {}\n", "spec.agents.form.models: unknown local key fast"},
+		{"  models:\n    fast:\n      model: economy_model\n    smart:\n      model: reasoning_model\n  default_model: fast\n  agents:\n    form:\n      agent: form_assistant\n      models:\n        - fast\n", "  models: {}\n  agents:\n    form:\n      agent: form_assistant\n", "spec.agents.form: requires at least one Application Model"},
+	} {
+		if !strings.Contains(paperdeskYAML, tc.old) {
+			t.Fatalf("fixture lacks %q", tc.old)
+		}
+		writeFiles(t, root, map[string]string{"applications/paperdesk.yaml": strings.Replace(paperdeskYAML, tc.old, tc.new, 1)})
+		_, err := load(root, nil, false)
+		if tc.want == "" && err != nil || tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
+			t.Errorf("%q: want %q, got %v", tc.new, tc.want, err)
+		}
+	}
+}
+
+func TestPreviousAgentAndApplicationFormatsFailClearly(t *testing.T) {
+	for _, tc := range []struct {
+		files map[string]string
+		want  string
+	}{
+		{map[string]string{"applications/product.yaml": strings.Replace(applicationYAML, "agents: {}", "agents: [{name: main}]", 1)}, "Application Agent reference arrays are unsupported"},
+		{map[string]string{"agents/support/agent.yaml": "version: 1\nkind: agent\nname: support\nspec:\n  display_name: Support\n  models: [smart]\n  tools: []\n", "agents/support/instruction.md": "Help\n"}, "spec.models is unsupported"},
+		{map[string]string{"agents/support/agent.yaml": "version: 1\nkind: agent\nname: support\nspec:\n  display_name: Support\n  tools: []\n", "agents/support/instruction.md": "Help\n", "agents/support/policies/member.yaml": "version: 1\nkind: policy\nname: member\nspec: {}\n"}, "agents/support/policies: Agent Policies are unsupported"},
+	} {
+		root := t.TempDir()
+		writeFiles(t, root, tc.files)
+		if _, err := load(root, nil, false); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("want %q, got %v", tc.want, err)
+		}
 	}
 }

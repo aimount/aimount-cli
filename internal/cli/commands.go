@@ -138,30 +138,44 @@ func validateExportGraph(desired graph) error {
 		}
 	}
 	for _, a := range desired.Applications {
-		seen := map[string]bool{}
-		for _, ref := range objects(obj(a["spec"])["agents"]) {
-			name := str(ref["name"])
-			agent := included("agent", name)
-			if agent == nil {
-				return commandError("incomplete_graph", "Application "+str(a["name"])+": Agent "+name+" missing locally", 1)
+		s := obj(a["spec"])
+		usable := func(kind, name string) (object, error) {
+			r := included(kind, name)
+			label := strings.ToUpper(kind[:1]) + kind[1:] + " " + name
+			if r == nil {
+				return nil, commandError("incomplete_graph", "Application "+str(a["name"])+": "+label+" missing locally", 1)
 			}
-			identity := name
-			if seen[identity] {
-				return commandError("duplicate_identity", "Application "+str(a["name"])+": several references resolve to one Agent", 1)
+			if a["archived"] != true && r["archived"] == true {
+				return nil, commandError("invalid_lifecycle", "Application "+str(a["name"])+": active Application requires active "+label, 1)
 			}
-			seen[identity] = true
-			if a["archived"] != true && agent["archived"] == true {
-				return commandError("invalid_lifecycle", "Application "+str(a["name"])+": active Application requires active Agents", 1)
+			return r, nil
+		}
+		for _, k := range slices.Sorted(maps.Keys(obj(s["models"]))) {
+			if _, e := usable("model", str(obj(obj(obj(s["models"])[k])["model"])["name"])); e != nil {
+				return e
+			}
+		}
+		agents := map[string]object{}
+		for _, k := range slices.Sorted(maps.Keys(obj(s["agents"]))) {
+			agent, e := usable("agent", str(obj(obj(obj(s["agents"])[k])["agent"])["name"]))
+			if e != nil {
+				return e
+			}
+			agents[k] = agent
+		}
+		for _, p := range slices.Sorted(maps.Keys(obj(s["plans"]))) {
+			rules := obj(obj(obj(s["plans"])[p])["agents"])
+			for _, k := range slices.Sorted(maps.Keys(rules)) {
+				for _, t := range objects(obj(obj(rules[k])["tools"])["allowed"]) {
+					if !slices.ContainsFunc(objects(obj(agents[k]["spec"])["tools"]), func(r object) bool { return r["name"] == t["name"] }) {
+						return commandError("incomplete_graph", "Application "+str(a["name"])+": Plan "+p+" Tool "+str(t["name"])+" is not a Tool of local Agent "+k, 1)
+					}
+				}
 			}
 		}
 	}
 	for _, a := range desired.Agents {
 		s := obj(a["spec"])
-		for _, r := range objects(s["models"]) {
-			if included("model", str(r["name"])) == nil {
-				return commandError("incomplete_graph", "Agent "+str(a["name"])+": Model "+str(r["name"])+" missing locally", 1)
-			}
-		}
 		for _, r := range objects(s["tools"]) {
 			t := included("tool", str(r["name"]))
 			if t == nil {
@@ -174,36 +188,6 @@ func validateExportGraph(desired graph) error {
 				}
 				if !found {
 					return commandError("incomplete_graph", "Agent "+str(a["name"])+": Tool/Contract missing locally", 1)
-				}
-			}
-		}
-		for _, p := range objects(s["policies"]) {
-			models := obj(p["models"])
-			match := func(name string, rs []object) bool {
-				for _, r := range rs {
-					if r["name"] == name {
-						return true
-					}
-				}
-				return false
-			}
-			effective := []object{}
-			for _, m := range objects(s["models"]) {
-				_, allowed := models["allowed"]
-				if (!allowed || match(str(m["name"]), objects(models["allowed"]))) && !match(str(m["name"]), objects(models["denied"])) {
-					effective = append(effective, m)
-				}
-			}
-			if len(effective) == 0 || !match(str(obj(models["default"])["name"]), effective) {
-				return commandError("invalid_policy", "Agent "+str(a["name"])+": invalid Policy Model selection", 1)
-			}
-			for _, kind := range []string{"model", "tool"} {
-				for _, group := range []string{"allowed", "denied"} {
-					for _, ref := range objects(obj(p[kind+"s"])[group]) {
-						if !match(str(ref["name"]), objects(s[kind+"s"])) {
-							return commandError("invalid_policy", "Agent "+str(a["name"])+": Policy reference outside ceiling", 1)
-						}
-					}
 				}
 			}
 		}

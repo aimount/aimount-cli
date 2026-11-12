@@ -86,7 +86,7 @@ and `2130706433` are rejected before transport or credential selection. Replace
 these spellings manually; no auth/config migration runs automatically.
 
 Plan/apply strictly parse the complete authored files, then let Stack API resolve
-aliases, references, lifecycle, Policies and omission/prune against current state.
+aliases, references, lifecycle and omission/prune against current state.
 They do not download a preliminary export. API derives missing retain/remove
 credential intentions; new keyed members still need explicit environment-backed
 replacement values. Pull retains staged complete-graph validation and atomic
@@ -108,31 +108,91 @@ tools/*/tool.yaml
 tools/*/contracts/*.yaml
 agents/*/agent.yaml
 agents/*/instruction.md
-agents/*/policies/*.yaml
 applications/*.yaml
 ```
 
 Every YAML envelope contains `version: 1`, lowercase `kind`, technical `name`,
-optional parent `archived`, and `spec`. Agent Models use ordered names; Tools use
-names or `{name, contract}`. Tool `current_contract` selects a discovered
-`tool_contract`. Policy Models contain `default` and optionally `allowed` or
-`denied`; Tool filters also allow one of these arrays.
+optional parent `archived`, and `spec`. Agents describe behavior only:
+`display_name`, optional `description`, and Tools as names or `{name, contract}`.
+Tool `current_contract` selects a discovered `tool_contract`. Models and Plans
+belong to Applications. Agent `spec.models`, `agents/*/policies/` directories and
+Application `agents` reference arrays from the previous format fail with a
+diagnostic; nothing is converted, so move them into `applications/*.yaml` by hand.
 
-Applications use `kind: application`, an immutable technical name and only
-`display_name` plus a required, possibly empty `agents: [{name: main}]` set in
-`spec`. Connections refer to Agents defined in the complete local graph; they
-have no default responder or ordering. Pull sorts them by current primary name.
-Only fixed-depth `.yaml` files participate; `.yml` and deeper examples remain
-unmanaged. For example, an Application can exist before any Agent is connected:
+Applications use `kind: application`, an immutable technical name and a `spec`
+with `display_name`, `models` and `agents` dictionaries, optional `default_model`,
+and optional `plans` with `default_plan`. Dictionary keys are Application-local
+(`^[a-z][a-z0-9_]{0,62}$`, at most 100 each, no rename or aliases); values refer
+to Project Models, Agents, Storages and Tools by technical name. One Project Agent
+may appear under several local keys with different settings.
 
 ```yaml
 version: 1
 kind: application
-name: product
+name: paperdesk
 spec:
-  display_name: Product assistant
-  agents: []
+  display_name: Paperdesk Assistant
+  models:
+    fast:
+      model: economy_model
+    smart:
+      model: reasoning_model
+  default_model: fast            # required with two or more Models
+  agents:
+    form:
+      agent: form_assistant
+      models:                    # explicit set; does not follow later additions
+        - fast
+      storages:
+        - document_templates
+    main:
+      agent: main_assistant      # omitted models inherit every Application Model
+      storages:
+        - product_documentation
+  default_plan: free             # required with two or more Plans
+  plans:
+    free:
+      agents:
+        main:
+          input: false
+      limits:
+        - agents:
+            - form
+          requests: 10
+          period: 1m             # positive s/m/h/d window, at most 30d
+    plus:
+      display_name: Plus
+      agents:
+        main:
+          models:
+            allowed:
+              - fast
+          default_model: fast
+          tools:
+            allowed:             # empty list denies every Tool
+              - documents_read
 ```
+
+Local validation checks structure, key grammar, unique sets, bounds, that every
+local key reference names a key of the same Application, and effective defaults.
+A local Agent default is its explicit `default_model` (inside its `models`), else
+`spec.default_model` when in its set, else its sole Model. A Plan `models.allowed`
+narrows that set; a Plan `default_model` must be in the local Agent's Models and,
+unless `input: false`, in `models.allowed`. Excluding the inherited default needs
+an explicit Plan `default_model` unless `input: false`; there is no sole-key
+fallback at Plan level. The API decides Project references, lifecycle and Plan
+Tool membership in the complete resulting graph. Plans have no `archived` field and
+the file carries no Users, assignments or runtime data. Pull sorts dictionaries
+and sets, and keeps omitted local Agent `models`/`default_model` omitted, since
+only omission inherits later Application Models. Only fixed-depth `.yaml` files
+participate; `.yml` and deeper examples remain unmanaged. An empty Application
+uses `models: {}` and `agents: {}`.
+
+Plan output shows changed fields, keys and set differences rather than list
+positions, plus the effective Model set of local Agents that inherit
+`spec.models`. Local Agent changes apply to queued inputs when their Run starts;
+removing a key or Plan keeps Sessions, history and accounting, while tokens and
+queued inputs bound to a removed Plan are refused.
 
 Model credentials use `{api_key: {from_env: VARIABLE}}` or `{none: {}}`.
 Webhook URL uses `{value: https://...}` or `{from_env: VARIABLE}`; auth uses
@@ -149,10 +209,9 @@ resources are authoritative: omitted saved parents need explicit irreversible
 existing aliases are resolved through fresh server bindings.
 Applications have no aliases: changing their name declares a different resource.
 Application omission requires `--prune` and authorizes erasure of its Users,
-conversations, files and configuration. Agent prune erases only its owned private
-tests/files and configuration, preserving ordinary Application history. Detaching
-an Agent connection needs no prune; it does not erase conversations or alone
-cancel accepted work. Physical cleanup remains asynchronous.
+conversations, files and configuration. Agent prune erases only its configuration,
+preserving ordinary Application history. Removing a local Agent key needs no
+prune; it does not erase conversations. Physical cleanup remains asynchronous.
 
 Stack requests and export require an explicit `applications` array, even when
 empty, alongside `models`, `tools` and `agents`. Applications also participate in

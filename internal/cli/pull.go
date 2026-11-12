@@ -81,8 +81,6 @@ func pullPath(path string) bool {
 		return p[2] == "agent.yaml" || p[2] == "instruction.md"
 	case len(p) == 4 && p[0] == "tools" && p[2] == "contracts":
 		return strings.HasSuffix(p[3], ".yaml")
-	case len(p) == 4 && p[0] == "agents" && p[2] == "policies":
-		return strings.HasSuffix(p[3], ".yaml")
 	}
 	return false
 }
