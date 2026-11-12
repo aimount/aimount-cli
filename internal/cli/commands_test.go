@@ -403,7 +403,7 @@ func TestApplicationSemanticSetsAndAccurateErasureScope(t *testing.T) {
 	after := object{
 		"models":        object{"fast": object{"model": ref("economy")}, "smart": object{"model": ref("reasoning")}},
 		"default_model": "fast",
-		"agents":        object{"main": object{"agent": ref("main_assistant"), "storages": []any{ref("docs")}}, "form": object{"agent": ref("form_assistant"), "models": []any{"fast"}}},
+		"agents":        object{"main": object{"agent": ref("main_assistant"), "storages": []any{ref("docs")}, "memory": "read"}, "form": object{"agent": ref("form_assistant"), "models": []any{"fast"}}},
 		"plans": object{
 			"free": object{"agents": object{"main": object{"models": object{"allowed": []any{"fast"}}}}, "limits": []any{object{"agents": []any{"form"}, "requests": 2, "period": "1m"}, object{"agents": []any{"main"}, "requests": 1, "period": "1m"}}},
 		},
@@ -418,6 +418,7 @@ func TestApplicationSemanticSetsAndAccurateErasureScope(t *testing.T) {
 		`models.smart: null → {"model":{"name":"reasoning"}}`,
 		`default_model: null → "fast"`,
 		`agents.main.storages: null → [{"name":"docs"}]`,
+		`agents.main.memory: null → "read"`,
 		`effective agents.main.models: +["smart"] -[]`,
 		`plans.old: {} → null`,
 		"removed Plans deny tokens and queued inputs bound to them",

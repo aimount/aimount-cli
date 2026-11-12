@@ -283,6 +283,11 @@ func periodValid(v any) bool {
 	return n*map[byte]int64{'s': 1, 'm': 60, 'h': 3600, 'd': 86400}[s[len(s)-1]] <= 30*86400
 }
 
+// memoryValid accepts an Agent User Memory access level.
+func memoryValid(v any) bool {
+	return slices.Contains([]any{"none", "read", "read_write"}, v)
+}
+
 // resolve mirrors the API resolveDefault: explicit, then inherited if in set, then the sole key.
 func resolve(explicit, inherited string, set []string) (string, bool) {
 	switch {
@@ -403,7 +408,7 @@ func applicationSpec(v any, path string) object {
 	for _, k := range agentKeys {
 		v := agents[k]
 		f := "spec.agents." + k
-		a := at(v, "agent models default_model storages", "agent", f)
+		a := at(v, "agent models default_model storages memory", "agent", f)
 		local := object{"agent": object{"name": name(a["agent"], f+".agent")}}
 		ceilings[k] = modelKeys
 		if v, ok := a["models"]; ok {
@@ -425,6 +430,12 @@ func applicationSpec(v any, path string) object {
 		defaults[k] = d
 		if v, ok := a["storages"]; ok {
 			local["storages"] = refs(v, f+".storages", 32)
+		}
+		if v, ok := a["memory"]; ok {
+			if !memoryValid(v) {
+				fail(path, f+".memory: expected none, read or read_write")
+			}
+			local["memory"] = v
 		}
 		locals[k] = local
 	}
@@ -452,7 +463,7 @@ func applicationSpec(v any, path string) object {
 					if !ok {
 						fail(path, rf+": unknown local Agent key")
 					}
-					r := at(rv, "input models default_model tools", "", rf)
+					r := at(rv, "input models default_model tools memory", "", rf)
 					rule := object{}
 					if v, ok := r["input"]; ok {
 						if _, ok := v.(bool); !ok {
@@ -483,6 +494,13 @@ func applicationSpec(v any, path string) object {
 					}
 					if v, ok := r["tools"]; ok {
 						rule["tools"] = object{"allowed": refs(at(v, "allowed", "allowed", rf+".tools")["allowed"], rf+".tools.allowed", 100)}
+					}
+					// A wider value narrows nothing; the API accepts it without effect.
+					if v, ok := r["memory"]; ok {
+						if !memoryValid(v) {
+							fail(path, rf+".memory: expected none, read or read_write")
+						}
+						rule["memory"] = v
 					}
 					rules[ak] = rule
 				}
@@ -1084,7 +1102,7 @@ func orderedKeys(m object) []string {
 	case m["models"] != nil && m["agents"] != nil:
 		order = strings.Fields("display_name models default_model agents default_plan plans")
 	case m["agent"] != nil:
-		order = strings.Fields("agent models default_model storages")
+		order = strings.Fields("agent models default_model storages memory")
 	case m["requests"] != nil:
 		order = strings.Fields("agents requests period")
 	case m["agents"] != nil || m["limits"] != nil:
@@ -1092,7 +1110,7 @@ func orderedKeys(m object) []string {
 	case m["display_name"] != nil && m["tools"] != nil:
 		order = strings.Fields("display_name description tools")
 	case m["input"] != nil || m["models"] != nil || m["default_model"] != nil || m["tools"] != nil:
-		order = strings.Fields("input models default_model tools")
+		order = strings.Fields("input models default_model tools memory")
 	case m["contract"] != nil && m["name"] != nil:
 		order = []string{"name", "contract"}
 	}
@@ -1231,7 +1249,7 @@ func authoredApplication(s object) object {
 	agents := keyed{}
 	for k, v := range obj(s["agents"]) {
 		a := obj(v)
-		local := fields(a, "models", "default_model")
+		local := fields(a, "models", "default_model", "memory")
 		local["agent"] = obj(a["agent"])["name"]
 		if v, ok := a["storages"]; ok {
 			local["storages"] = names(v)
@@ -1248,7 +1266,7 @@ func authoredApplication(s object) object {
 				rules := keyed{}
 				for k, v := range obj(v) {
 					r := obj(v)
-					rule := fields(r, "input", "models", "default_model")
+					rule := fields(r, "input", "models", "default_model", "memory")
 					if v, ok := r["tools"]; ok {
 						rule["tools"] = object{"allowed": names(obj(v)["allowed"])}
 					}
@@ -1281,6 +1299,12 @@ func remoteApplication(s object, partial bool) object {
 		return k
 	}
 	ref := func(v any) any { return object{"name": key(obj(v)["name"])} }
+	memory := func(v any) any {
+		if !memoryValid(v) {
+			bad()
+		}
+		return v
+	}
 	byWire := func(a []any) { sort.Slice(a, func(i, j int) bool { return wire(a[i]) < wire(a[j]) }) }
 	set := func(v any, minimum, maximum int, read func(any) any) []any {
 		a, ok := v.([]any)
@@ -1345,6 +1369,9 @@ func remoteApplication(s object, partial bool) object {
 			if v, ok := a["storages"]; ok {
 				local["storages"] = set(v, 0, 32, ref)
 			}
+			if v, ok := a["memory"]; ok {
+				local["memory"] = memory(v)
+			}
 			return local
 		})
 	}
@@ -1369,6 +1396,9 @@ func remoteApplication(s object, partial bool) object {
 					}
 					if v, ok := r["tools"]; ok {
 						rule["tools"] = object{"allowed": set(obj(v)["allowed"], 0, 100, ref)}
+					}
+					if v, ok := r["memory"]; ok {
+						rule["memory"] = memory(v)
 					}
 					return rule
 				})

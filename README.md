@@ -149,6 +149,7 @@ spec:
       agent: main_assistant      # omitted models inherit every Application Model
       storages:
         - product_documentation
+      memory: read_write         # none (default), read or read_write
   default_plan: free             # required with two or more Plans
   plans:
     free:
@@ -171,6 +172,7 @@ spec:
           tools:
             allowed:             # empty list denies every Tool
               - documents_read
+          memory: read           # narrows the local Agent ceiling
 ```
 
 Local validation checks structure, key grammar, unique sets, bounds, that every
@@ -180,11 +182,16 @@ A local Agent default is its explicit `default_model` (inside its `models`), els
 narrows that set; a Plan `default_model` must be in the local Agent's Models and,
 unless `input: false`, in `models.allowed`. Excluding the inherited default needs
 an explicit Plan `default_model` unless `input: false`; there is no sole-key
-fallback at Plan level. The API decides Project references, lifecycle and Plan
+fallback at Plan level. Local Agent `memory` (`none`, `read` or `read_write`;
+omitted means `none`) is the Agent's ceiling on User Memory: `read` injects the
+Memory block before each Model call, `read_write` also offers the Memory Tools.
+A Plan `memory` narrows that ceiling; a wider value has no effect and omission
+keeps the ceiling. Neither gates the User's or backend's direct Memory API. The API decides Project references, lifecycle and Plan
 Tool membership in the complete resulting graph. Plans have no `archived` field and
-the file carries no Users, assignments or runtime data. Pull sorts dictionaries
-and sets, and keeps omitted local Agent `models`/`default_model` omitted, since
-only omission inherits later Application Models. Only fixed-depth `.yaml` files
+the file carries no Users, assignments, Memory records or runtime data. Pull sorts
+dictionaries and sets, and keeps omitted local Agent `models`/`default_model`
+omitted, since only omission inherits later Application Models; `memory` also
+round-trips as authored, so an omitted value stays omitted. Only fixed-depth `.yaml` files
 participate; `.yml` and deeper examples remain unmanaged. An empty Application
 uses `models: {}` and `agents: {}`.
 

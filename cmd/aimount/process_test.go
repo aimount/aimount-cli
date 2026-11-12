@@ -385,7 +385,7 @@ func TestExecutableApplicationPullAtomicPublication(t *testing.T) {
 				case "/v0/projects/prj_0123456789ABCDEF/stack":
 					app, models, agents := `"models":{},"agents":{}`, "[]", "[]"
 					if mode == "connected" {
-						app = `"models":{"fast":{"model":{"id":"mdl_0123456789ABCDEF","name":"smart"}}},"agents":{"main":{"agent":{"id":"agt_0123456789ABCDEF","name":"zulu"}},"helper":{"agent":{"name":"zulu"}},"form":{"agent":{"name":"alpha"},"models":["fast"],"storages":[{"id":"sto_0123456789ABCDEF","name":"docs"}]}},"plans":{"plus":{"display_name":"Plus","agents":{"main":{"input":false}},"limits":[{"agents":["helper","form"],"requests":5,"period":"1h"}],"users":["never-output"]}}`
+						app = `"models":{"fast":{"model":{"id":"mdl_0123456789ABCDEF","name":"smart"}}},"agents":{"main":{"agent":{"id":"agt_0123456789ABCDEF","name":"zulu"}},"helper":{"agent":{"name":"zulu"}},"form":{"agent":{"name":"alpha"},"models":["fast"],"storages":[{"id":"sto_0123456789ABCDEF","name":"docs"}],"memory":"read_write"}},"plans":{"plus":{"display_name":"Plus","agents":{"main":{"input":false},"form":{"memory":"read"}},"limits":[{"agents":["helper","form"],"requests":5,"period":"1h"}],"users":["never-output"]}}`
 						models = `[{"name":"smart","spec":{"display_name":"Smart","limits":{"context_window_tokens":8192,"max_output_tokens":1024},"capabilities":{"input_modalities":["text"],"output_modalities":["text"],"tool_calling":false},"nodes":[{"name":"primary","display_name":"Primary","provider":"openai_compatible","api":"responses","base_url":"https://provider.example/v1","model":"test","credentials":{"mode":"none"}}]}}]`
 						agents = `[{"name":"zulu","spec":{"display_name":"Zulu","instruction":"Help","tools":[]}},{"name":"alpha","spec":{"display_name":"Alpha","instruction":"Help","tools":[]}}]`
 					}
@@ -423,7 +423,7 @@ func TestExecutableApplicationPullAtomicPublication(t *testing.T) {
 				data, err := os.ReadFile(filepath.Join(root, "applications/product.yaml"))
 				want := "version: 1\nkind: application\nname: product\narchived: true\nspec:\n  display_name: Product\n  models: {}\n  agents: {}\n"
 				if mode == "connected" {
-					want = "version: 1\nkind: application\nname: product\narchived: true\nspec:\n  display_name: Product\n  models:\n    fast:\n      model: smart\n  agents:\n    form:\n      agent: alpha\n      models:\n        - fast\n      storages:\n        - docs\n    helper:\n      agent: zulu\n    main:\n      agent: zulu\n  plans:\n    plus:\n      display_name: Plus\n      agents:\n        main:\n          input: false\n      limits:\n        - agents:\n            - form\n            - helper\n          requests: 5\n          period: 1h\n"
+					want = "version: 1\nkind: application\nname: product\narchived: true\nspec:\n  display_name: Product\n  models:\n    fast:\n      model: smart\n  agents:\n    form:\n      agent: alpha\n      models:\n        - fast\n      storages:\n        - docs\n      memory: read_write\n    helper:\n      agent: zulu\n    main:\n      agent: zulu\n  plans:\n    plus:\n      display_name: Plus\n      agents:\n        form:\n          memory: read\n        main:\n          input: false\n      limits:\n        - agents:\n            - form\n            - helper\n          requests: 5\n          period: 1h\n"
 				}
 				if err != nil || string(data) != want {
 					t.Fatal("noncanonical Application published", err, string(data))
