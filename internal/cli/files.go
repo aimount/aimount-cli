@@ -283,6 +283,19 @@ func periodValid(v any) bool {
 	return n*map[byte]int64{'s': 1, 'm': 60, 'h': 3600, 'd': 86400}[s[len(s)-1]] <= 30*86400
 }
 
+// resolve mirrors the API resolveDefault: explicit, then inherited if in set, then the sole key.
+func resolve(explicit, inherited string, set []string) (string, bool) {
+	switch {
+	case explicit != "":
+		return explicit, slices.Contains(set, explicit)
+	case inherited != "" && slices.Contains(set, inherited):
+		return inherited, true
+	case len(set) == 1:
+		return set[0], true
+	}
+	return "", false
+}
+
 // applicationSpec strictly parses authored Application configuration into the
 // Stack shape with name-only references. Local key membership and effective
 // defaults are checked as in the API domain; Project resource existence,
@@ -313,7 +326,8 @@ func applicationSpec(v any, path string) object {
 		}
 		return m
 	}
-	set := func(v any, field string, minimum, maximum int, known object, refs bool) []any {
+	// set returns sorted unique names; local keys must be in known, references are checked by the API.
+	set := func(v any, field string, minimum, maximum int, known []string, local bool) []string {
 		a, ok := v.([]any)
 		if !ok || len(a) < minimum || len(a) > maximum {
 			fail(path, field+": expected "+strconv.Itoa(minimum)+" to "+strconv.Itoa(maximum)+" items")
@@ -324,26 +338,33 @@ func applicationSpec(v any, path string) object {
 			if slices.Contains(names, n) {
 				fail(path, field+": duplicate "+n)
 			}
-			if _, ok := known[n]; known != nil && !ok {
+			if local && !slices.Contains(known, n) {
 				fail(path, field+": unknown local key "+n)
 			}
 			names = append(names, n)
 		}
 		sort.Strings(names)
+		return names
+	}
+	// wired converts names to the []any form export validation reads.
+	wired := func(names []string) []any {
 		out := []any{}
 		for _, n := range names {
-			if refs {
-				out = append(out, object{"name": n})
-			} else {
-				out = append(out, n)
-			}
+			out = append(out, n)
+		}
+		return out
+	}
+	refs := func(v any, field string, maximum int) []any {
+		out := []any{}
+		for _, n := range set(v, field, 0, maximum, nil, false) {
+			out = append(out, object{"name": n})
 		}
 		return out
 	}
 	var models object
-	member := func(v any, field string, known object) string {
+	member := func(v any, field string, known []string) string {
 		n := name(v, field)
-		if _, ok := known[n]; !ok {
+		if !slices.Contains(known, n) {
 			if _, model := models[n]; model && strings.HasSuffix(field, ".default_model") && field != "spec.default_model" {
 				fail(path, field+": "+n+" is not in the local Agent's models")
 			}
@@ -358,60 +379,52 @@ func applicationSpec(v any, path string) object {
 	display(s, path)
 	out := object{"display_name": s["display_name"]}
 	models = dict(s["models"], "spec.models")
+	modelKeys := slices.Sorted(maps.Keys(models))
 	bindings := object{}
-	for _, k := range slices.Sorted(maps.Keys(models)) {
+	for _, k := range modelKeys {
 		b := models[k]
 		bindings[k] = object{"model": object{"name": name(at(b, "model", "model", "spec.models."+k)["model"], "spec.models."+k+".model")}}
 	}
 	out["models"] = bindings
-	// Defaults resolve as in the API domain: explicit (must be in the set),
-	// else the inherited default when it is in the set, else the sole key.
-	applicationDefault := ""
+	explicit := ""
 	if v, ok := s["default_model"]; ok {
-		applicationDefault = member(v, "spec.default_model", models)
-		out["default_model"] = applicationDefault
-	} else if len(models) >= 2 {
+		explicit = member(v, "spec.default_model", modelKeys)
+		out["default_model"] = explicit
+	}
+	applicationDefault, valid := resolve(explicit, "", modelKeys)
+	if !valid && len(modelKeys) >= 2 {
 		fail(path, "spec.default_model: required with two or more Models")
-	} else {
-		for k := range models {
-			applicationDefault = k
-		}
 	}
 	agents := dict(s["agents"], "spec.agents")
-	ceilings := map[string]object{}
+	agentKeys := slices.Sorted(maps.Keys(agents))
+	ceilings := map[string][]string{}
 	defaults := map[string]string{}
 	locals := object{}
-	for _, k := range slices.Sorted(maps.Keys(agents)) {
+	for _, k := range agentKeys {
 		v := agents[k]
 		f := "spec.agents." + k
 		a := at(v, "agent models default_model storages", "agent", f)
 		local := object{"agent": object{"name": name(a["agent"], f+".agent")}}
-		ceilings[k] = models
+		ceilings[k] = modelKeys
 		if v, ok := a["models"]; ok {
-			keys := set(v, f+".models", 1, 100, models, false)
-			local["models"] = keys
-			ceilings[k] = object{}
-			for _, m := range keys {
-				ceilings[k][str(m)] = true
-			}
+			ceilings[k] = set(v, f+".models", 1, 100, modelKeys, true)
+			local["models"] = wired(ceilings[k])
 		}
 		if len(ceilings[k]) == 0 {
 			fail(path, f+": requires at least one Application Model")
 		}
+		explicit := ""
 		if v, ok := a["default_model"]; ok {
-			defaults[k] = member(v, f+".default_model", ceilings[k])
-			local["default_model"] = defaults[k]
-		} else if _, ok := ceilings[k][applicationDefault]; ok {
-			defaults[k] = applicationDefault
-		} else if len(ceilings[k]) == 1 {
-			for m := range ceilings[k] {
-				defaults[k] = m
-			}
-		} else {
+			explicit = member(v, f+".default_model", ceilings[k])
+			local["default_model"] = explicit
+		}
+		d, valid := resolve(explicit, applicationDefault, ceilings[k])
+		if !valid {
 			fail(path, f+".default_model: required because spec.default_model is not in this local Agent's models")
 		}
+		defaults[k] = d
 		if v, ok := a["storages"]; ok {
-			local["storages"] = set(v, f+".storages", 0, 32, nil, true)
+			local["storages"] = refs(v, f+".storages", 32)
 		}
 		locals[k] = local
 	}
@@ -447,27 +460,29 @@ func applicationSpec(v any, path string) object {
 						}
 						rule["input"] = v
 					}
-					enabled := r["input"] != false
 					effective := ceiling
 					if v, ok := r["models"]; ok {
-						allowed := set(at(v, "allowed", "allowed", rf+".models")["allowed"], rf+".models.allowed", 1, 100, ceiling, false)
-						rule["models"] = object{"allowed": allowed}
-						effective = object{}
-						for _, m := range allowed {
-							effective[str(m)] = true
-						}
+						effective = set(at(v, "allowed", "allowed", rf+".models")["allowed"], rf+".models.allowed", 1, 100, ceiling, true)
+						rule["models"] = object{"allowed": wired(effective)}
 					}
+					explicit := ""
 					if v, ok := r["default_model"]; ok {
-						d := member(v, rf+".default_model", ceiling)
-						rule["default_model"] = d
-						if _, ok := effective[d]; enabled && !ok {
-							fail(path, rf+".default_model: "+d+" is not in models.allowed")
+						explicit = member(v, rf+".default_model", ceiling)
+						rule["default_model"] = explicit
+					}
+					_, valid := resolve(explicit, defaults[ak], effective)
+					// An excluded inherited default needs an explicit replacement, not the sole allowed key.
+					if explicit == "" && !slices.Contains(effective, defaults[ak]) {
+						valid = false
+					}
+					if !valid && r["input"] != false {
+						if explicit != "" {
+							fail(path, rf+".default_model: "+explicit+" is not in models.allowed")
 						}
-					} else if _, ok := effective[defaults[ak]]; enabled && !ok {
 						fail(path, rf+".default_model: required because inherited default "+defaults[ak]+" is not in models.allowed")
 					}
 					if v, ok := r["tools"]; ok {
-						rule["tools"] = object{"allowed": set(at(v, "allowed", "allowed", rf+".tools")["allowed"], rf+".tools.allowed", 0, 100, nil, true)}
+						rule["tools"] = object{"allowed": refs(at(v, "allowed", "allowed", rf+".tools")["allowed"], rf+".tools.allowed", 100)}
 					}
 					rules[ak] = rule
 				}
@@ -489,7 +504,7 @@ func applicationSpec(v any, path string) object {
 					if !periodValid(m["period"]) {
 						fail(path, lf+".period: expected a positive s/m/h/d duration of at most 30d")
 					}
-					limits = append(limits, object{"agents": set(m["agents"], lf+".agents", 1, 100, agents, false), "requests": requests, "period": m["period"]})
+					limits = append(limits, object{"agents": wired(set(m["agents"], lf+".agents", 1, 100, agentKeys, true)), "requests": requests, "period": m["period"]})
 				}
 				plan["limits"] = limits
 			}
@@ -498,7 +513,7 @@ func applicationSpec(v any, path string) object {
 		out["plans"] = result
 	}
 	if v, ok := s["default_plan"]; ok {
-		out["default_plan"] = member(v, "spec.default_plan", plans)
+		out["default_plan"] = member(v, "spec.default_plan", slices.Collect(maps.Keys(plans)))
 	} else if len(plans) >= 2 {
 		fail(path, "spec.default_plan: required with two or more Plans")
 	}
