@@ -568,6 +568,19 @@ func TestApplicationLocalKeysRoundTripCanonically(t *testing.T) {
 func TestApplicationLocalValidationNamesTheField(t *testing.T) {
 	root := t.TempDir()
 	for _, tc := range []struct{ old, new, want string }{
+		// Effective defaults resolve exactly like the API domain.
+		{"      default_model: fast\n      storages: []\n", "      storages: []\n", ""},
+		{"    smart:\n      model: reasoning_model\n  default_model: fast\n  agents:\n    form:\n      agent: form_assistant\n      models:\n        - fast\n", "    smart:\n      model: reasoning_model\n    turbo:\n      model: turbo_model\n  default_model: turbo\n  agents:\n    form:\n      agent: form_assistant\n      models:\n        - fast\n        - smart\n", "spec.agents.form.default_model: required because spec.default_model is not in this local Agent's models"},
+		{"    smart:\n      model: reasoning_model\n  default_model: fast\n", "    smart:\n      model: reasoning_model\n    turbo:\n      model: turbo_model\n  default_model: turbo\n", ""},
+		{"      models:\n        - fast\n      storages:\n        - document_templates\n", "      models:\n        - fast\n      default_model: smart\n", "spec.agents.form.default_model: smart is not in the local Agent's models"},
+		{"              - fast\n          default_model: fast\n", "              - fast\n          default_model: smart\n", "spec.plans.plus.agents.main.default_model: smart is not in models.allowed"},
+		{"              - fast\n          default_model: fast\n", "              - fast\n          input: false\n          default_model: smart\n", ""},
+		{"            allowed:\n              - fast\n          default_model: fast\n", "            allowed:\n              - smart\n", "spec.plans.plus.agents.main.default_model: required because inherited default fast is not in models.allowed"},
+		{"            allowed:\n              - fast\n          default_model: fast\n", "            allowed:\n              - smart\n          input: false\n", ""},
+		{"            allowed:\n              - fast\n          default_model: fast\n", "            allowed:\n              - smart\n          input: true\n", "spec.plans.plus.agents.main.default_model: required because inherited default fast"},
+		{"            allowed:\n              - fast\n          default_model: fast\n", "            allowed:\n              - fast\n", ""},
+		{"        main:\n          input: false\n", "        form:\n          default_model: smart\n          input: false\n", "spec.plans.free.agents.form.default_model: smart is not in the local Agent's models"},
+		{"        main:\n          input: false\n", "        main:\n          default_model: turbo\n", "spec.plans.free.agents.main.default_model: unknown local key turbo"},
 		{"        main:\n          input: false\n", "        ghost:\n          input: false\n", "spec.plans.free.agents.ghost: unknown local Agent key"},
 		{"  default_model: fast\n  agents:", "  agents:", "spec.default_model: required with two or more Models"},
 		{"  default_plan: free\n", "", "spec.default_plan: required with two or more Plans"},
@@ -592,8 +605,9 @@ func TestApplicationLocalValidationNamesTheField(t *testing.T) {
 			t.Fatalf("fixture lacks %q", tc.old)
 		}
 		writeFiles(t, root, map[string]string{"applications/paperdesk.yaml": strings.Replace(paperdeskYAML, tc.old, tc.new, 1)})
-		if _, err := load(root, nil, false); err == nil || !strings.Contains(err.Error(), tc.want) {
-			t.Errorf("want %q, got %v", tc.want, err)
+		_, err := load(root, nil, false)
+		if tc.want == "" && err != nil || tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
+			t.Errorf("%q: want %q, got %v", tc.new, tc.want, err)
 		}
 	}
 }

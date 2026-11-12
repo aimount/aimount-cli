@@ -284,9 +284,9 @@ func periodValid(v any) bool {
 }
 
 // applicationSpec strictly parses authored Application configuration into the
-// Stack shape with name-only references. Local key membership and required
-// defaults are checked here; effective default resolution and Project resource
-// existence stay with the API planner.
+// Stack shape with name-only references. Local key membership and effective
+// defaults are checked as in the API domain; Project resource existence,
+// lifecycle and Plan Tool membership stay with the API planner.
 func applicationSpec(v any, path string) object {
 	at := func(v any, allowed, required, field string) object {
 		if caught(func() { strictObject(v, strings.Fields(allowed), strings.Fields(required), path) }) != nil {
@@ -340,9 +340,13 @@ func applicationSpec(v any, path string) object {
 		}
 		return out
 	}
+	var models object
 	member := func(v any, field string, known object) string {
 		n := name(v, field)
 		if _, ok := known[n]; !ok {
+			if _, model := models[n]; model && strings.HasSuffix(field, ".default_model") && field != "spec.default_model" {
+				fail(path, field+": "+n+" is not in the local Agent's models")
+			}
 			fail(path, field+": unknown local key "+n)
 		}
 		return n
@@ -353,20 +357,29 @@ func applicationSpec(v any, path string) object {
 	s := at(v, "display_name models default_model agents default_plan plans", "display_name models agents", "spec")
 	display(s, path)
 	out := object{"display_name": s["display_name"]}
-	models := dict(s["models"], "spec.models")
+	models = dict(s["models"], "spec.models")
 	bindings := object{}
 	for _, k := range slices.Sorted(maps.Keys(models)) {
 		b := models[k]
 		bindings[k] = object{"model": object{"name": name(at(b, "model", "model", "spec.models."+k)["model"], "spec.models."+k+".model")}}
 	}
 	out["models"] = bindings
+	// Defaults resolve as in the API domain: explicit (must be in the set),
+	// else the inherited default when it is in the set, else the sole key.
+	applicationDefault := ""
 	if v, ok := s["default_model"]; ok {
-		out["default_model"] = member(v, "spec.default_model", models)
+		applicationDefault = member(v, "spec.default_model", models)
+		out["default_model"] = applicationDefault
 	} else if len(models) >= 2 {
 		fail(path, "spec.default_model: required with two or more Models")
+	} else {
+		for k := range models {
+			applicationDefault = k
+		}
 	}
 	agents := dict(s["agents"], "spec.agents")
 	ceilings := map[string]object{}
+	defaults := map[string]string{}
 	locals := object{}
 	for _, k := range slices.Sorted(maps.Keys(agents)) {
 		v := agents[k]
@@ -386,7 +399,16 @@ func applicationSpec(v any, path string) object {
 			fail(path, f+": requires at least one Application Model")
 		}
 		if v, ok := a["default_model"]; ok {
-			local["default_model"] = member(v, f+".default_model", ceilings[k])
+			defaults[k] = member(v, f+".default_model", ceilings[k])
+			local["default_model"] = defaults[k]
+		} else if _, ok := ceilings[k][applicationDefault]; ok {
+			defaults[k] = applicationDefault
+		} else if len(ceilings[k]) == 1 {
+			for m := range ceilings[k] {
+				defaults[k] = m
+			}
+		} else {
+			fail(path, f+".default_model: required because spec.default_model is not in this local Agent's models")
 		}
 		if v, ok := a["storages"]; ok {
 			local["storages"] = set(v, f+".storages", 0, 32, nil, true)
@@ -425,11 +447,24 @@ func applicationSpec(v any, path string) object {
 						}
 						rule["input"] = v
 					}
+					enabled := r["input"] != false
+					effective := ceiling
 					if v, ok := r["models"]; ok {
-						rule["models"] = object{"allowed": set(at(v, "allowed", "allowed", rf+".models")["allowed"], rf+".models.allowed", 1, 100, ceiling, false)}
+						allowed := set(at(v, "allowed", "allowed", rf+".models")["allowed"], rf+".models.allowed", 1, 100, ceiling, false)
+						rule["models"] = object{"allowed": allowed}
+						effective = object{}
+						for _, m := range allowed {
+							effective[str(m)] = true
+						}
 					}
 					if v, ok := r["default_model"]; ok {
-						rule["default_model"] = member(v, rf+".default_model", ceiling)
+						d := member(v, rf+".default_model", ceiling)
+						rule["default_model"] = d
+						if _, ok := effective[d]; enabled && !ok {
+							fail(path, rf+".default_model: "+d+" is not in models.allowed")
+						}
+					} else if _, ok := effective[defaults[ak]]; enabled && !ok {
+						fail(path, rf+".default_model: required because inherited default "+defaults[ak]+" is not in models.allowed")
 					}
 					if v, ok := r["tools"]; ok {
 						rule["tools"] = object{"allowed": set(at(v, "allowed", "allowed", rf+".tools")["allowed"], rf+".tools.allowed", 0, 100, nil, true)}

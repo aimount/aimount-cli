@@ -86,8 +86,7 @@ and `2130706433` are rejected before transport or credential selection. Replace
 these spellings manually; no auth/config migration runs automatically.
 
 Plan/apply strictly parse the complete authored files, then let Stack API resolve
-aliases, references, lifecycle, effective defaults and omission/prune against
-current state.
+aliases, references, lifecycle and omission/prune against current state.
 They do not download a preliminary export. API derives missing retain/remove
 credential intentions; new keyed members still need explicit environment-backed
 replacement values. Pull retains staged complete-graph validation and atomic
@@ -174,10 +173,15 @@ spec:
               - documents_read
 ```
 
-Local validation checks structure, key grammar, unique sets, bounds and that
-every local key reference names a key of the same Application. The API decides
-Project references, lifecycle, effective default resolution and Plan Tool
-membership in the complete resulting graph. Plans have no `archived` field and
+Local validation checks structure, key grammar, unique sets, bounds, that every
+local key reference names a key of the same Application, and effective defaults.
+A local Agent default is its explicit `default_model` (inside its `models`), else
+`spec.default_model` when in its set, else its sole Model. A Plan `models.allowed`
+narrows that set; a Plan `default_model` must be in the local Agent's Models and,
+unless `input: false`, in `models.allowed`. Excluding the inherited default needs
+an explicit Plan `default_model` unless `input: false`; there is no sole-key
+fallback at Plan level. The API decides Project references, lifecycle and Plan
+Tool membership in the complete resulting graph. Plans have no `archived` field and
 the file carries no Users, assignments or runtime data. Pull sorts dictionaries
 and sets, and keeps omitted local Agent `models`/`default_model` omitted, since
 only omission inherits later Application Models. Only fixed-depth `.yaml` files
