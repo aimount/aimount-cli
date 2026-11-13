@@ -198,8 +198,9 @@ uses `models: {}` and `agents: {}`.
 Optional `tool_endpoint` receives every `server_webhook` Tool call of the
 Application's local Agents; the receiver routes by `tool.id` or `tool.name`. Use
 exactly one of `url: https://...` (no credentials, query or fragment) or
-`from_env: VARIABLE`. A present variable sends its URL; a missing one keeps the
-saved URL. Pull never writes an env-backed URL: it keeps a matching local
+`from_env: VARIABLE`. A present variable sends its URL. A missing one keeps the
+saved URL only when it is already env-backed; a new or literal endpoint needs the
+variable. Pull never writes an env-backed URL: it keeps a matching local
 `from_env`, otherwise it writes `AIMOUNT_APPLICATION_<length>_<NAME>_13_TOOL_ENDPOINT_URL`
 (for `paperdesk`: `AIMOUNT_APPLICATION_9_PAPERDESK_13_TOOL_ENDPOINT_URL`).
 Signing secrets are managed in the App and never appear in files, plans or pull

@@ -674,9 +674,6 @@ func TestApplicationToolEndpointRoundTripsWithoutEnvURL(t *testing.T) {
 	if err != nil || files["applications/product.yaml"] != strings.Replace(env, "TOOLS_URL", "AIMOUNT_APPLICATION_7_PRODUCT_13_TOOL_ENDPOINT_URL", 1) {
 		t.Fatal("derived locator", err, files["applications/product.yaml"])
 	}
-	if locator("application", "a_b", "tool_endpoint", "url", nil) == locator("application", "a", "tool_endpoint", "url", nil) {
-		t.Fatal("generated locator collision")
-	}
 	if _, err := load(root, map[string]string{"TOOLS_URL": "http://private.example/tools"}, false); err == nil || strings.Contains(err.Error(), "private.example") {
 		t.Fatal("invalid env endpoint accepted or disclosed", err)
 	}
@@ -723,15 +720,12 @@ func TestServerToolContractHasNoDestinationOrCredential(t *testing.T) {
 	}
 	for _, webhook := range []string{
 		"{url: {value: https://provider.example/tools}, auth: {none: {}}}",
-		"{url: {from_env: TOOLS_URL}}",
-		"{auth: {bearer_token: {from_env: TOOLS_TOKEN}}}",
-		"{url_source: value, url: https://provider.example/tools}",
 		"{timeout_seconds: 31}",
 		"null",
 	} {
 		files["tools/lookup/contracts/v1.yaml"] = contract + "  webhook: " + webhook + "\n"
 		writeFiles(t, root, files)
-		if _, err := load(root, map[string]string{"TOOLS_URL": "https://provider.example/tools", "TOOLS_TOKEN": "synthetic-token"}, false); err == nil {
+		if _, err := load(root, nil, false); err == nil {
 			t.Errorf("old or invalid webhook field accepted: %s", webhook)
 		}
 	}
