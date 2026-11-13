@@ -183,15 +183,13 @@ narrows that set; a Plan `default_model` must be in the local Agent's Models and
 unless `input: false`, in `models.allowed`. Excluding the inherited default needs
 an explicit Plan `default_model` unless `input: false`; there is no sole-key
 fallback at Plan level. Local Agent `memory` (`none`, `read` or `read_write`;
-omitted means `none`) is the Agent's ceiling on User Memory: `read` injects the
-Memory block before each Model call, `read_write` also offers the Memory Tools.
-A Plan `memory` narrows that ceiling; a wider value has no effect and omission
-keeps the ceiling. Neither gates the User's or backend's direct Memory API. The API decides Project references, lifecycle and Plan
+omitted means `none`) is its User Memory ceiling, and a Plan `memory` only narrows
+it; see `app/reference/memory.md` in the docs repository. The API decides Project
+references, lifecycle and Plan
 Tool membership in the complete resulting graph. Plans have no `archived` field and
 the file carries no Users, assignments, Memory records or runtime data. Pull sorts
 dictionaries and sets, and keeps omitted local Agent `models`/`default_model`
-omitted, since only omission inherits later Application Models; `memory` also
-round-trips as authored, so an omitted value stays omitted. Only fixed-depth `.yaml` files
+omitted, since only omission inherits later Application Models. Only fixed-depth `.yaml` files
 participate; `.yml` and deeper examples remain unmanaged. An empty Application
 uses `models: {}` and `agents: {}`.
 

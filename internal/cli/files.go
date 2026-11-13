@@ -283,9 +283,14 @@ func periodValid(v any) bool {
 	return n*map[byte]int64{'s': 1, 'm': 60, 'h': 3600, 'd': 86400}[s[len(s)-1]] <= 30*86400
 }
 
-// memoryValid accepts an Agent User Memory access level.
-func memoryValid(v any) bool {
-	return slices.Contains([]any{"none", "read", "read_write"}, v)
+var memoryLevels = []any{"none", "read", "read_write"}
+
+// memoryLevel returns an authored Agent User Memory access level or fails.
+func memoryLevel(v any, path, field string) any {
+	if !slices.Contains(memoryLevels, v) {
+		fail(path, field+": expected none, read or read_write")
+	}
+	return v
 }
 
 // resolve mirrors the API resolveDefault: explicit, then inherited if in set, then the sole key.
@@ -432,10 +437,7 @@ func applicationSpec(v any, path string) object {
 			local["storages"] = refs(v, f+".storages", 32)
 		}
 		if v, ok := a["memory"]; ok {
-			if !memoryValid(v) {
-				fail(path, f+".memory: expected none, read or read_write")
-			}
-			local["memory"] = v
+			local["memory"] = memoryLevel(v, path, f+".memory")
 		}
 		locals[k] = local
 	}
@@ -495,12 +497,8 @@ func applicationSpec(v any, path string) object {
 					if v, ok := r["tools"]; ok {
 						rule["tools"] = object{"allowed": refs(at(v, "allowed", "allowed", rf+".tools")["allowed"], rf+".tools.allowed", 100)}
 					}
-					// A wider value narrows nothing; the API accepts it without effect.
 					if v, ok := r["memory"]; ok {
-						if !memoryValid(v) {
-							fail(path, rf+".memory: expected none, read or read_write")
-						}
-						rule["memory"] = v
+						rule["memory"] = memoryLevel(v, path, rf+".memory")
 					}
 					rules[ak] = rule
 				}
@@ -1300,7 +1298,7 @@ func remoteApplication(s object, partial bool) object {
 	}
 	ref := func(v any) any { return object{"name": key(obj(v)["name"])} }
 	memory := func(v any) any {
-		if !memoryValid(v) {
+		if !slices.Contains(memoryLevels, v) {
 			bad()
 		}
 		return v
