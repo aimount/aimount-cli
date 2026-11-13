@@ -399,6 +399,7 @@ spec:
       storages:
         - document_templates
         - product_documentation
+      memory: read_write
     text:
       agent: form_assistant
       models:
@@ -406,6 +407,7 @@ spec:
         - smart
       default_model: fast
       storages: []
+      memory: none
   default_plan: free
   plans:
     free:
@@ -429,6 +431,7 @@ spec:
           tools:
             allowed:
               - documents_read
+          memory: read
       limits:
         - agents:
             - main
@@ -445,6 +448,7 @@ spec:
           default_model: smart
           tools:
             allowed: []
+          memory: read_write
       limits: []
 `
 
@@ -459,6 +463,7 @@ spec:
   default_model: fast
   agents:
     main:
+      memory: read_write
       agent: main_assistant
       storages: [product_documentation, document_templates]
     form:
@@ -470,6 +475,7 @@ spec:
       models: [smart, fast]
       default_model: fast
       storages: []
+      memory: none
   default_plan: free
   plans:
     free:
@@ -483,13 +489,14 @@ spec:
         main:
           default_model: fast
           models: {allowed: [fast]}
+          memory: read
           tools: {allowed: [documents_read]}
       limits:
         - {agents: [main], requests: 10, period: 1m}
         - {agents: [form, text], requests: 100, period: 1m}
     pro:
       agents:
-        main: {default_model: smart, tools: {allowed: []}}
+        main: {memory: read_write, default_model: smart, tools: {allowed: []}}
       limits: []
 `
 
@@ -551,7 +558,7 @@ func TestApplicationLocalKeysRoundTripCanonically(t *testing.T) {
 		t.Fatal(err)
 	}
 	main := wire(obj(obj(obj(g.Applications[0]["spec"])["agents"])["main"]))
-	if main != `{"agent":{"name":"main_assistant"},"storages":[{"name":"document_templates"},{"name":"product_documentation"}]}` {
+	if main != `{"agent":{"name":"main_assistant"},"memory":"read_write","storages":[{"name":"document_templates"},{"name":"product_documentation"}]}` {
 		t.Fatal("inheriting local Agent gained models/default or lost name-only refs", main)
 	}
 	files, err := render(g, nil)
@@ -598,6 +605,8 @@ func TestApplicationLocalValidationNamesTheField(t *testing.T) {
 		{"    pro:\n", "    pro:\n      archived: true\n", "spec.plans.pro: invalid or unknown fields"},
 		{"    fast:\n      model: economy_model\n", "    fast:\n      model: economy_model\n      default: true\n", "spec.models.fast: invalid or unknown fields"},
 		{"  agents:\n    form:", "  agents:\n    Form:", "spec.agents: invalid local key"},
+		{"      memory: read_write\n", "      memory: write\n", "spec.agents.main.memory: expected none, read or read_write"},
+		{"          memory: read\n", "          memory: true\n", "spec.plans.plus.agents.main.memory: expected none, read or read_write"},
 		{"  models:\n    fast:\n      model: economy_model\n    smart:\n      model: reasoning_model\n  default_model: fast\n", "  models: {}\n", "spec.agents.form.models: unknown local key fast"},
 		{"  models:\n    fast:\n      model: economy_model\n    smart:\n      model: reasoning_model\n  default_model: fast\n  agents:\n    form:\n      agent: form_assistant\n      models:\n        - fast\n", "  models: {}\n  agents:\n    form:\n      agent: form_assistant\n", "spec.agents.form: requires at least one Application Model"},
 	} {
