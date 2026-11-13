@@ -176,16 +176,14 @@ func TestActualPullPreservesLocatorsThroughAliasAndDetectsChangedBindings(t *tes
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	g := emptyGraph()
-	schema := object{"type": "object", "additionalProperties": false}
-	g.Applications = []object{{"name": "product", "spec": object{"display_name": "Product", "models": object{}, "agents": object{}}}}
-	g.Tools = []object{{"name": "lookup", "archived": true, "spec": object{"display_name": "Lookup", "enabled": true, "current_contract": "v1", "contracts": []any{object{"name": "v1", "description": "Lookup", "type": "server_webhook", "input_schema": schema, "output_schema": object{}, "webhook": object{"url_source": "env", "auth": "bearer_token", "timeout_seconds": 10}}}}}}
+	g.Applications = []object{{"name": "product", "archived": true, "spec": object{"display_name": "Product", "models": object{}, "agents": object{}, "tool_endpoint": object{"url_source": "env"}}}}
 	local := emptyGraph()
-	local.Tools = []object{maps.Clone(g.Tools[0])}
-	local.Tools[0]["name"] = "old_lookup"
-	bindings := []any{object{"kind": "tool", "name": "lookup", "id": "tol_0000000000000001"}, object{"kind": "tool", "name": "old_lookup", "id": "tol_0000000000000001"}}
+	local.Applications = []object{maps.Clone(g.Applications[0])}
+	local.Applications[0]["name"] = "old_product"
+	bindings := []any{object{"kind": "application", "name": "product", "id": "app_0000000000000001"}, object{"kind": "application", "name": "old_product", "id": "app_0000000000000001"}}
 	for _, changed := range []bool{false, true} {
 		root := t.TempDir()
-		files, e := render(local, map[string]string{"tool/old_lookup/v1/url": "MY_URL", "tool/old_lookup/v1/key": "MY_TOKEN"})
+		files, e := render(local, map[string]string{"application/old_product/tool_endpoint/url": "MY_URL"})
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -202,7 +200,7 @@ func TestActualPullPreservesLocatorsThroughAliasAndDetectsChangedBindings(t *tes
 				reads++
 				bs := append([]any{}, bindings...)
 				if changed && reads == 2 {
-					bs[1] = object{"kind": "tool", "name": "old_lookup", "id": "tol_0000000000000002"}
+					bs[1] = object{"kind": "application", "name": "old_product", "id": "app_0000000000000002"}
 				}
 				io.WriteString(w, wire(object{"version": 1, "bindings": bs}))
 			case strings.HasSuffix(r.URL.Path, "/stack"):
@@ -233,11 +231,11 @@ func TestActualPullPreservesLocatorsThroughAliasAndDetectsChangedBindings(t *tes
 				t.Fatal(e)
 			}
 			i, e := inspect(root)
-			if e != nil || i.Locators["tool/lookup/v1/url"] != "MY_URL" || i.Locators["tool/lookup/v1/key"] != "MY_TOKEN" {
+			if e != nil || wire(i.Locators) != `{"application/product/tool_endpoint/url":"MY_URL"}` {
 				t.Fatal(i, e)
 			}
-			if _, e := os.Stat(filepath.Join(root, "applications/product.yaml")); e != nil {
-				t.Fatal("Application not published with preserved locators", e)
+			if _, e := os.Stat(filepath.Join(root, "applications/old_product.yaml")); !os.IsNotExist(e) {
+				t.Fatal("renamed Application file kept", e)
 			}
 		}
 		b, e := os.ReadFile(filepath.Join(root, "unknown.txt"))

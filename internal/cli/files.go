@@ -385,7 +385,7 @@ func applicationSpec(v any, path string) object {
 	if _, ok := obj(v)["agents"].([]any); ok {
 		fail(path, "spec.agents: Application Agent reference arrays are unsupported; declare a mapping of local Agent keys")
 	}
-	s := at(v, "display_name models default_model agents default_plan plans", "display_name models agents", "spec")
+	s := at(v, "display_name models default_model agents default_plan plans tool_endpoint", "display_name models agents", "spec")
 	display(s, path)
 	out := object{"display_name": s["display_name"]}
 	models = dict(s["models"], "spec.models")
@@ -532,6 +532,24 @@ func applicationSpec(v any, path string) object {
 		out["default_plan"] = member(v, "spec.default_plan", slices.Collect(maps.Keys(plans)))
 	} else if len(plans) >= 2 {
 		fail(path, "spec.default_plan: required with two or more Plans")
+	}
+	if v, ok := s["tool_endpoint"]; ok {
+		e := at(v, "url from_env", "", "spec.tool_endpoint")
+		if len(e) != 1 {
+			fail(path, "spec.tool_endpoint: expected exactly one of url or from_env")
+		}
+		if u, ok := e["url"]; ok {
+			if caught(func() { endpoint(u, path) }) != nil {
+				fail(path, "spec.tool_endpoint.url: expected an HTTPS URL without credentials, query or fragment")
+			}
+			out["tool_endpoint"] = object{"url": u, "url_source": "value"}
+		} else {
+			if !envRE.MatchString(str(e["from_env"])) {
+				fail(path, "spec.tool_endpoint.from_env: invalid environment locator")
+			}
+			// The CLI resolves the URL from the environment; without it the API keeps the saved URL.
+			out["tool_endpoint"] = object{"url_source": "env"}
+		}
 	}
 	if len(wire(out)) > 256<<10 {
 		fail(path, "configuration exceeds 256 KiB", "invariant")
@@ -690,23 +708,9 @@ func inspect(root string) (inv inventory, err error) {
 					}
 				}
 			}
-			if doc["kind"] == "tool_contract" && contractRE.MatchString(str(doc["name"])) {
-				owner := filepath.Join(filepath.Dir(filepath.Dir(rel)), "tool.yaml")
-				var raw string
-				var errs []error
-				collect(&errs, func() { raw = safeText(root, filepath.Join(root, owner)) })
-				if len(errs) > 0 {
-					continue
-				}
-				tool, e := parseYAML(raw, owner)
-				if e != nil || tool["kind"] != "tool" || !nameRE.MatchString(str(tool["name"])) {
-					continue
-				}
-				w := obj(obj(doc["spec"])["webhook"])
-				for purpose, loc := range map[string]string{"url": str(obj(w["url"])["from_env"]), "key": str(obj(obj(w["auth"])["bearer_token"])["from_env"])} {
-					if envRE.MatchString(loc) {
-						inv.Locators["tool/"+str(tool["name"])+"/"+str(doc["name"])+"/"+purpose] = loc
-					}
+			if doc["kind"] == "application" && nameRE.MatchString(str(doc["name"])) {
+				if loc := str(obj(obj(doc["spec"])["tool_endpoint"])["from_env"]); envRE.MatchString(loc) {
+					inv.Locators["application/"+str(doc["name"])+"/tool_endpoint/url"] = loc
 				}
 			}
 		}
@@ -891,33 +895,18 @@ func load(root string, env map[string]string, pull bool) (g graph, err error) {
 							fail(cp, "client webhook unsupported")
 						}
 					case "server_webhook":
-						w := strictObject(c["webhook"], strings.Fields("url auth timeout_seconds invocation_name"), strings.Fields("url auth"), cp)
-						u := strictObject(w["url"], []string{"value", "from_env"}, nil, cp)
-						auth := strictObject(w["auth"], []string{"none", "bearer_token"}, nil, cp)
-						if len(u) != 1 || len(auth) != 1 {
-							fail(cp, "one URL source and auth mode required")
+						// The Application tool_endpoint is the destination; a Contract has none.
+						w := object{}
+						if v, ok := c["webhook"]; ok {
+							w = strictObject(v, strings.Fields("timeout_seconds invocation_name"), nil, cp)
 						}
-						out := object{"url_source": "value", "auth": "none", "timeout_seconds": int64(10)}
+						out := object{"timeout_seconds": int64(10)}
 						if v, ok := w["timeout_seconds"]; ok {
 							out["timeout_seconds"] = positive(v, cp, 30)
 						}
 						if v, ok := w["invocation_name"]; ok {
 							technical(v, cp, false)
 							out["invocation_name"] = v
-						}
-						if v, ok := u["from_env"]; ok {
-							out["url_source"] = "env"
-							pending = append(pending, pendingSecret{t, name, envName(v, cp), out})
-						} else {
-							endpoint(u["value"], cp)
-							out["url"] = u["value"]
-						}
-						if v, ok := auth["bearer_token"]; ok {
-							a := strictObject(v, []string{"from_env"}, []string{"from_env"}, cp)
-							out["auth"] = "bearer_token"
-							pending = append(pending, pendingSecret{t, name, envName(a["from_env"], cp), nil})
-						} else {
-							strictObject(auth["none"], nil, nil, cp)
 						}
 						c["webhook"] = out
 					default:
@@ -980,6 +969,9 @@ func load(root string, env map[string]string, pull bool) (g graph, err error) {
 				path := "applications/" + f
 				a := parent(parsed[path], "application", path)
 				a["spec"] = applicationSpec(a["spec"], path)
+				if loc, ok := obj(obj(parsed[path]["spec"])["tool_endpoint"])["from_env"]; ok {
+					pending = append(pending, pendingSecret{locator: str(loc), url: obj(obj(a["spec"])["tool_endpoint"])})
+				}
 				g.Applications = append(g.Applications, a)
 			})
 		}
@@ -1096,9 +1088,9 @@ func orderedKeys(m object) []string {
 	case m["input_schema"] != nil:
 		order = strings.Fields("description type input_schema output_schema webhook")
 	case m["timeout_seconds"] != nil:
-		order = strings.Fields("url auth timeout_seconds invocation_name")
+		order = strings.Fields("timeout_seconds invocation_name")
 	case m["models"] != nil && m["agents"] != nil:
-		order = strings.Fields("display_name models default_model agents default_plan plans")
+		order = strings.Fields("display_name models default_model agents default_plan plans tool_endpoint")
 	case m["agent"] != nil:
 		order = strings.Fields("agent models default_model storages memory")
 	case m["requests"] != nil:
@@ -1155,7 +1147,7 @@ func render(g graph, locs map[string]string) (files map[string]string, err error
 		for _, a := range g.Applications {
 			name := str(a["name"])
 			technical(name, "export", false)
-			files["applications/"+name+".yaml"] = yamlString(authored("application", name, a["archived"], authoredApplication(obj(a["spec"]))))
+			files["applications/"+name+".yaml"] = yamlString(authored("application", name, a["archived"], authoredApplication(name, obj(a["spec"]), locs)))
 		}
 		for _, m := range g.Models {
 			name := str(m["name"])
@@ -1187,19 +1179,7 @@ func render(g graph, locs map[string]string) (files map[string]string, err error
 				technical(cn, "export", true)
 				out := fields(c, "description", "type", "input_schema", "output_schema")
 				if w := obj(c["webhook"]); w != nil {
-					u := object{"value": w["url"]}
-					if w["url_source"] == "env" {
-						u = object{"from_env": locator("tool", name, cn, "url", locs)}
-					}
-					a := object{"none": object{}}
-					if w["auth"] == "bearer_token" {
-						a = object{"bearer_token": object{"from_env": locator("tool", name, cn, "key", locs)}}
-					}
-					wh := object{"url": u, "auth": a, "timeout_seconds": w["timeout_seconds"]}
-					if v, ok := w["invocation_name"]; ok {
-						wh["invocation_name"] = v
-					}
-					out["webhook"] = wh
+					out["webhook"] = fields(w, "timeout_seconds", "invocation_name")
 				}
 				files["tools/"+name+"/contracts/"+cn+".yaml"] = yamlString(authored("tool_contract", cn, false, out))
 			}
@@ -1230,7 +1210,8 @@ func render(g graph, locs map[string]string) (files map[string]string, err error
 }
 
 // authoredApplication renders references as names; omitted optional fields stay omitted.
-func authoredApplication(s object) object {
+// An env tool endpoint has no exported URL and renders its local or derived locator.
+func authoredApplication(name string, s object, locs map[string]string) object {
 	names := func(v any) []any {
 		out := []any{}
 		for _, r := range objects(v) {
@@ -1275,6 +1256,13 @@ func authoredApplication(s object) object {
 			plans[k] = plan
 		}
 		out["plans"] = plans
+	}
+	if e := obj(s["tool_endpoint"]); e != nil {
+		if e["url_source"] == "env" {
+			out["tool_endpoint"] = object{"from_env": locator("application", name, "tool_endpoint", "url", locs)}
+		} else {
+			out["tool_endpoint"] = object{"url": e["url"]}
+		}
 	}
 	return out
 }
@@ -1421,6 +1409,17 @@ func remoteApplication(s object, partial bool) object {
 			return plan
 		})
 	}
+	if v, ok := s["tool_endpoint"]; ok {
+		// An env URL is never projected, even if a response includes it.
+		switch e := obj(v); {
+		case e != nil && e["url_source"] == "env":
+			out["tool_endpoint"] = object{"url_source": "env"}
+		case e != nil && e["url_source"] == "value" && str(e["url"]) != "":
+			out["tool_endpoint"] = fields(e, "url", "url_source")
+		default:
+			bad()
+		}
+	}
 	return out
 }
 
@@ -1551,19 +1550,10 @@ func readRemoteSpec(kind string, s object, partial bool) object {
 			p := fields(m, "name", "description", "type", "input_schema", "output_schema")
 			if w, ok := m["webhook"]; ok {
 				m := obj(w)
-				if m == nil || !slices.Contains([]string{"value", "env"}, str(m["url_source"])) || !slices.Contains([]string{"none", "bearer_token"}, str(m["auth"])) {
-					return nil
-				}
 				if _, ok := exactInt(m["timeout_seconds"], 30, 1); !ok {
 					return nil
 				}
-				p["webhook"] = fields(m, "url_source", "auth", "timeout_seconds", "invocation_name")
-				if m["url_source"] == "value" {
-					if _, ok := m["url"].(string); !ok {
-						return nil
-					}
-					obj(p["webhook"])["url"] = m["url"]
-				}
+				p["webhook"] = fields(m, "timeout_seconds", "invocation_name")
 			}
 			return p
 		}) {

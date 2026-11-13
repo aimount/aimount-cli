@@ -637,3 +637,96 @@ func TestPreviousAgentAndApplicationFormatsFailClearly(t *testing.T) {
 		}
 	}
 }
+
+func TestApplicationToolEndpointRoundTripsWithoutEnvURL(t *testing.T) {
+	value := applicationYAML + "  tool_endpoint:\n    url: https://provider.example/tools\n"
+	env := applicationYAML + "  tool_endpoint:\n    from_env: TOOLS_URL\n"
+	root := t.TempDir()
+	writeFiles(t, root, map[string]string{"applications/product.yaml": value})
+	g, err := load(root, nil, false)
+	if err != nil || wire(obj(g.Applications[0]["spec"])["tool_endpoint"]) != `{"url":"https://provider.example/tools","url_source":"value"}` {
+		t.Fatal("value endpoint", err, wire(g))
+	}
+	files, err := render(g, nil)
+	if err != nil || files["applications/product.yaml"] != value {
+		t.Fatal("value endpoint did not round-trip", err, files["applications/product.yaml"])
+	}
+
+	writeFiles(t, root, map[string]string{"applications/product.yaml": env})
+	g, err = load(root, map[string]string{"TOOLS_URL": "https://private.example/tools"}, false)
+	if err != nil || wire(obj(g.Applications[0]["spec"])["tool_endpoint"]) != `{"url":"https://private.example/tools","url_source":"env"}` {
+		t.Fatal("env endpoint not resolved", err, wire(g))
+	}
+	// Without the variable the API keeps the saved URL of the same Application.
+	g, err = load(root, nil, false)
+	if err != nil || wire(obj(g.Applications[0]["spec"])["tool_endpoint"]) != `{"url_source":"env"}` {
+		t.Fatal("absent env endpoint", err, wire(g))
+	}
+	inv, err := inspect(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, err = render(g, inv.Locators)
+	if err != nil || files["applications/product.yaml"] != env {
+		t.Fatal("local locator not preserved", err, files["applications/product.yaml"])
+	}
+	files, err = render(g, nil)
+	if err != nil || files["applications/product.yaml"] != strings.Replace(env, "TOOLS_URL", "AIMOUNT_APPLICATION_7_PRODUCT_13_TOOL_ENDPOINT_URL", 1) {
+		t.Fatal("derived locator", err, files["applications/product.yaml"])
+	}
+	if _, err := load(root, map[string]string{"TOOLS_URL": "http://private.example/tools"}, false); err == nil || strings.Contains(err.Error(), "private.example") {
+		t.Fatal("invalid env endpoint accepted or disclosed", err)
+	}
+
+	for _, endpoint := range []string{
+		"{url: https://provider.example/tools, from_env: TOOLS_URL}",
+		"{}",
+		"{url: http://provider.example/tools}",
+		"{url: 'https://provider.example/tools?q=1'}",
+		"{from_env: 1_TOOLS}",
+		"{url: https://provider.example/tools, url_source: value}",
+		"{value: https://provider.example/tools}",
+	} {
+		writeFiles(t, root, map[string]string{"applications/product.yaml": applicationYAML + "  tool_endpoint: " + endpoint + "\n"})
+		if _, err := load(root, nil, false); err == nil || !strings.Contains(err.Error(), "spec.tool_endpoint") {
+			t.Errorf("invalid tool_endpoint %s: %v", endpoint, err)
+		}
+	}
+}
+
+func TestServerToolContractHasNoDestinationOrCredential(t *testing.T) {
+	contract := "version: 1\nkind: tool_contract\nname: v1\nspec:\n  description: Lookup\n  type: server_webhook\n  input_schema:\n    type: object\n    additionalProperties: false\n  output_schema: {}\n"
+	files := map[string]string{"tools/lookup/tool.yaml": "version: 1\nkind: tool\nname: lookup\nspec:\n  display_name: Lookup\n  current_contract: v1\n"}
+	root := t.TempDir()
+	for webhook, want := range map[string]string{
+		"": `{"timeout_seconds":10}`,
+		"  webhook: {timeout_seconds: 5, invocation_name: lookup_v1}\n": `{"invocation_name":"lookup_v1","timeout_seconds":5}`,
+	} {
+		files["tools/lookup/contracts/v1.yaml"] = contract + webhook
+		writeFiles(t, root, files)
+		g, err := load(root, nil, false)
+		if err != nil || wire(obj(objects(obj(g.Tools[0]["spec"])["contracts"])[0])["webhook"]) != want {
+			t.Fatal("server webhook settings", err, wire(g))
+		}
+		rendered, err := render(g, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		other := t.TempDir()
+		writeFiles(t, other, rendered)
+		if again, err := load(other, nil, false); err != nil || wire(again) != wire(g) {
+			t.Fatal("server Contract did not round-trip", err, rendered)
+		}
+	}
+	for _, webhook := range []string{
+		"{url: {value: https://provider.example/tools}, auth: {none: {}}}",
+		"{timeout_seconds: 31}",
+		"null",
+	} {
+		files["tools/lookup/contracts/v1.yaml"] = contract + "  webhook: " + webhook + "\n"
+		writeFiles(t, root, files)
+		if _, err := load(root, nil, false); err == nil {
+			t.Errorf("old or invalid webhook field accepted: %s", webhook)
+		}
+	}
+}

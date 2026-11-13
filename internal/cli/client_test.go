@@ -192,6 +192,11 @@ func TestPlanReadSetValidatesAndProjectsConsumedShape(t *testing.T) {
 		func(m object) { obj(list(m["resources"])[0])["id"] = "tol_0123456789ABCDEF" }, func(m object) { obj(list(m["resources"])[0])["etag"] = "" },
 		func(m object) { obj(list(m["bindings"])[0])["name"] = "INVALID" }, func(m object) { obj(list(m["credentials"])[0])["version"] = json.Number("-1") },
 		func(m object) { obj(list(m["credentials"])[0])["target"] = "INVALID" },
+		// Tool webhooks carry no credentials; only Model Node credentials are reviewed.
+		func(m object) {
+			obj(list(m["credentials"])[0])["kind"] = "tool"
+			obj(list(m["credentials"])[0])["id"] = "tol_0123456789ABCDEF"
+		},
 	}
 	for i, mutate := range mutations {
 		t.Run(strconv.Itoa(i), func(t *testing.T) {
@@ -296,11 +301,12 @@ func TestConsumedResponseShapesAreTolerantAndPrivate(t *testing.T) {
 func TestExportAndPlanDropUnknownOperationalFields(t *testing.T) {
 	for _, path := range []string{"/v0/projects/prj_0123456789ABCDEF/stack", "/v0/projects/prj_0123456789ABCDEF/stack/plan"} {
 		spec := `{"display_name":"Safe","enabled":true,"current_contract":"v1","future_secret":"never-output","contracts":[{"name":"v1","description":"Safe","type":"server_webhook","input_schema":{"type":"object","additionalProperties":false},"output_schema":{},"webhook":{"url_source":"env","url":"https://private.invalid/never-output","auth":"bearer_token","timeout_seconds":10,"token":"never-output"}}]}`
-		body := `{"version":1,"models":[],"agents":[],"applications":[],"tools":[{"name":"lookup","spec":` + spec + `}]}`
+		application := `{"display_name":"Safe","models":{},"agents":{},"tool_endpoint":{"url_source":"env","url":"https://private.invalid/never-output","secret":"never-output"}}`
+		body := `{"version":1,"models":[],"agents":[],"applications":[{"name":"product","spec":` + application + `}],"tools":[{"name":"lookup","spec":` + spec + `}]}`
 		method := "GET"
 		if strings.HasSuffix(path, "/plan") {
 			method = "POST"
-			body = `{"version":1,"read_set":` + validReadSetJSON + `,"changes":[{"kind":"tool","name":"lookup","operation":"CREATE","after":` + spec + `}]}`
+			body = `{"version":1,"read_set":` + validReadSetJSON + `,"changes":[{"kind":"tool","name":"lookup","operation":"CREATE","after":` + spec + `},{"kind":"application","name":"product","operation":"CREATE","after":` + application + `}]}`
 		}
 		s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, body) }))
 		c := newClient(s.URL, "synthetic")
@@ -356,9 +362,15 @@ func TestRemoteSpecProjectionPreservesConsumedValues(t *testing.T) {
 		{"model", "model",
 			`{"display_name":" Safe ","description":"line\r\nnext","limits":{"context_window_tokens":9007199254740991,"max_output_tokens":1e3,"future_secret":"never-output"},"capabilities":{"input_modalities":["file","text","image"],"output_modalities":["text"],"tool_calling":false,"future_secret":"never-output"},"nodes":[{"name":"z","credentials":{"mode":"api_key","key":"never-output"},"enabled":false,"route_weight":2e0,"provider":" provider ","base_url":"https://example.test/"},{"name":"a","credentials":{"mode":"none"}}],"enabled":true,"instruction":"ignored","future_secret":"never-output"}`,
 			`{"display_name":" Safe ","description":"line\r\nnext","limits":{"context_window_tokens":9007199254740991,"max_output_tokens":1e3},"capabilities":{"input_modalities":["file","text","image"],"output_modalities":["text"],"tool_calling":false},"nodes":[{"name":"z","credentials":{"mode":"api_key"},"enabled":false,"route_weight":2e0,"provider":" provider ","base_url":"https://example.test/"},{"name":"a","credentials":{"mode":"none"}}]}`, true},
-		{"tool schemas and webhook sources", "tool",
-			`{"contracts":[{"name":"2","type":"client","input_schema":{"future_keyword":{"const":9007199254740993}},"output_schema":{"const":1e400,"examples":["1e400"]},"future_secret":"never-output"},{"name":"1","type":"server_webhook","input_schema":{},"output_schema":{},"webhook":{"url_source":"env","url":{"private":"never-output"},"auth":"bearer_token","timeout_seconds":3e1,"invocation_name":" raw ","token":"never-output"}},{"name":"value","type":"server_webhook","input_schema":{},"output_schema":{},"webhook":{"url_source":"value","url":" https://example.test/ ","auth":"none","timeout_seconds":1}}]}`,
-			`{"contracts":[{"name":"2","type":"client","input_schema":{"future_keyword":{"const":9007199254740993}},"output_schema":{"const":1e400,"examples":["1e400"]}},{"name":"1","type":"server_webhook","input_schema":{},"output_schema":{},"webhook":{"url_source":"env","auth":"bearer_token","timeout_seconds":3e1,"invocation_name":" raw "}},{"name":"value","type":"server_webhook","input_schema":{},"output_schema":{},"webhook":{"url_source":"value","url":" https://example.test/ ","auth":"none","timeout_seconds":1}}]}`, true},
+		{"tool schemas and webhook settings drop destinations", "tool",
+			`{"contracts":[{"name":"2","type":"client","input_schema":{"future_keyword":{"const":9007199254740993}},"output_schema":{"const":1e400,"examples":["1e400"]},"future_secret":"never-output"},{"name":"1","type":"server_webhook","input_schema":{},"output_schema":{},"webhook":{"url_source":"env","url":{"private":"never-output"},"auth":"bearer_token","timeout_seconds":3e1,"invocation_name":" raw ","token":"never-output"}},{"name":"value","type":"server_webhook","input_schema":{},"output_schema":{},"webhook":{"timeout_seconds":1}}]}`,
+			`{"contracts":[{"name":"2","type":"client","input_schema":{"future_keyword":{"const":9007199254740993}},"output_schema":{"const":1e400,"examples":["1e400"]}},{"name":"1","type":"server_webhook","input_schema":{},"output_schema":{},"webhook":{"timeout_seconds":3e1,"invocation_name":" raw "}},{"name":"value","type":"server_webhook","input_schema":{},"output_schema":{},"webhook":{"timeout_seconds":1}}]}`, true},
+		{"application value tool endpoint", "application",
+			`{"display_name":"Safe","models":{},"agents":{},"tool_endpoint":{"url_source":"value","url":"https://example.test/tools","future_secret":"never-output"}}`,
+			`{"display_name":"Safe","models":{},"agents":{},"tool_endpoint":{"url_source":"value","url":"https://example.test/tools"}}`, true},
+		{"application env tool endpoint omits URL", "application",
+			`{"display_name":"Safe","models":{},"agents":{},"tool_endpoint":{"url_source":"env","url":"https://private.invalid/never-output"}}`,
+			`{"display_name":"Safe","models":{},"agents":{},"tool_endpoint":{"url_source":"env"}}`, true},
 		{"agent tool refs drop removed fields", "agent",
 			`{"instruction":" raw\r\ntext\n\n","models":[{"name":"z","id":"never-output"}],"tools":[{"name":"z","contract":"1"},{"name":"a"}],"policies":[{"name":"p","future_secret":"never-output"}],"future_secret":"never-output"}`,
 			`{"instruction":" raw\r\ntext\n\n","tools":[{"name":"z","contract":"1"},{"name":"a"}]}`, true},
@@ -425,10 +437,8 @@ func TestRemoteSpecRejectsMalformedConsumedFieldsInExportAndPlan(t *testing.T) {
 		{"tool", `{"contracts":[{"name":"1","type":"client","input_schema":null,"output_schema":{}}]}`},
 		{"tool", `{"contracts":[{"name":"1","type":"client","input_schema":{},"output_schema":true}]}`},
 		{"tool", `{"contracts":[{"name":"1","type":"client","input_schema":{},"output_schema":{},"webhook":null}]}`},
-		{"tool", `{"contracts":[{"name":"1","type":"client","input_schema":{},"output_schema":{},"webhook":{"url_source":"other","auth":"none","timeout_seconds":1}}]}`},
-		{"tool", `{"contracts":[{"name":"1","type":"client","input_schema":{},"output_schema":{},"webhook":{"url_source":"env","auth":"other","timeout_seconds":1}}]}`},
-		{"tool", `{"contracts":[{"name":"1","type":"client","input_schema":{},"output_schema":{},"webhook":{"url_source":"env","auth":"none","timeout_seconds":31}}]}`},
-		{"tool", `{"contracts":[{"name":"1","type":"client","input_schema":{},"output_schema":{},"webhook":{"url_source":"value","auth":"none","timeout_seconds":1}}]}`},
+		{"tool", `{"contracts":[{"name":"1","type":"client","input_schema":{},"output_schema":{},"webhook":{}}]}`},
+		{"tool", `{"contracts":[{"name":"1","type":"client","input_schema":{},"output_schema":{},"webhook":{"timeout_seconds":31}}]}`},
 		{"agent", `{"tools":null}`},
 		{"agent", `{"tools":[{"name":"INVALID"}]}`},
 		{"agent", `{"tools":[{"name":"safe","contract":null}]}`},
@@ -453,6 +463,10 @@ func TestRemoteSpecRejectsMalformedConsumedFieldsInExportAndPlan(t *testing.T) {
 		{"application", `{"display_name":"Safe","models":{},"agents":{},"plans":{"p":{"limits":[{"agents":["main"],"requests":0,"period":"1m"}]}}}`},
 		{"application", `{"display_name":"Safe","models":{},"agents":{},"plans":{"p":{"limits":[{"agents":["main"],"requests":1,"period":"31d"}]}}}`},
 		{"application", `{"display_name":"Safe","models":{},"agents":{},"plans":{"p":{"limits":[{"agents":[],"requests":1,"period":"1m"}]}}}`},
+		{"application", `{"display_name":"Safe","models":{},"agents":{},"tool_endpoint":null}`},
+		{"application", `{"display_name":"Safe","models":{},"agents":{},"tool_endpoint":{"url":"https://example.test/tools"}}`},
+		{"application", `{"display_name":"Safe","models":{},"agents":{},"tool_endpoint":{"url_source":"value"}}`},
+		{"application", `{"display_name":"Safe","models":{},"agents":{},"tool_endpoint":{"url_source":"other","url":"https://example.test/tools"}}`},
 	} {
 		for _, field := range []string{"", "before", "after"} {
 			t.Run(tc.kind+"/"+tc.spec+"/"+field, func(t *testing.T) {

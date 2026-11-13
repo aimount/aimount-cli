@@ -551,14 +551,7 @@ func projectReadSet(m object) (object, error) {
 				}
 				safe = append(safe, fields(r, "kind", "name", "id"))
 			case "credentials":
-				if (kind != "model" && kind != "tool") || !nameRE.MatchString(str(r["name"])) {
-					return bad()
-				}
-				targetRE := nameRE
-				if kind == "tool" {
-					targetRE = contractRE
-				}
-				if !targetRE.MatchString(str(r["target"])) {
+				if kind != "model" || !nameRE.MatchString(str(r["name"])) || !nameRE.MatchString(str(r["target"])) {
 					return bad()
 				}
 				if _, ok := exactInt(r["version"], math.MaxInt64, 0); !ok {

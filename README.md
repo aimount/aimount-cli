@@ -173,6 +173,8 @@ spec:
             allowed:             # empty list denies every Tool
               - documents_read
           memory: read           # narrows the local Agent ceiling
+  tool_endpoint:
+    url: https://tools.paperdesk.example/aimount   # or from_env: VARIABLE
 ```
 
 Local validation checks structure, key grammar, unique sets, bounds, that every
@@ -193,6 +195,17 @@ omitted, since only omission inherits later Application Models. Only fixed-depth
 participate; `.yml` and deeper examples remain unmanaged. An empty Application
 uses `models: {}` and `agents: {}`.
 
+Optional `tool_endpoint` receives every `server_webhook` Tool call of the
+Application's local Agents; the receiver routes by `tool.id` or `tool.name`. Use
+exactly one of `url: https://...` (no credentials, query or fragment) or
+`from_env: VARIABLE`. A present variable sends its URL. A missing one keeps the
+saved URL only when it is already env-backed; a new or literal endpoint needs the
+variable. Pull never writes an env-backed URL: it keeps a matching local
+`from_env`, otherwise it writes `AIMOUNT_APPLICATION_<length>_<NAME>_13_TOOL_ENDPOINT_URL`
+(for `paperdesk`: `AIMOUNT_APPLICATION_9_PAPERDESK_13_TOOL_ENDPOINT_URL`).
+Signing secrets are managed in the App and never appear in files, plans or pull
+output; the CLI has no secret commands.
+
 Plan output shows changed fields, keys and set differences rather than list
 positions, plus the effective Model set of local Agents that inherit
 `spec.models`. Local Agent changes apply to queued inputs when their Run starts;
@@ -200,9 +213,9 @@ removing a key or Plan keeps Sessions, history and accounting, while tokens and
 queued inputs bound to a removed Plan are refused.
 
 Model credentials use `{api_key: {from_env: VARIABLE}}` or `{none: {}}`.
-Webhook URL uses `{value: https://...}` or `{from_env: VARIABLE}`; auth uses
-`{bearer_token: {from_env: VARIABLE}}` or `{none: {}}`. Present credential values
-go only into request credential intentions. Missing values retain existing keys;
+A `server_webhook` Contract's optional `webhook` holds only `timeout_seconds`
+(1..30, default 10) and `invocation_name`; it has no URL, auth or token.
+Present credential values go only into request credential intentions. Missing values retain existing keys;
 new keyed routes require a value. Keys never enter pull output or diagnostics.
 
 Unknown/duplicate fields, anchors, aliases, tags, unsupported schemas, missing
