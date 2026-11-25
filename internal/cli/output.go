@@ -32,7 +32,7 @@ func printText(out io.Writer, result Result) {
 		line("API", target["api"])
 		project := obj(target["project"])
 		if project != nil {
-			line("Project", str(project["display_name"])+" ("+str(project["id"])+")")
+			line("Project", str(project["name"])+" ("+str(project["id"])+")")
 		}
 	}
 	switch result.Command {
@@ -61,7 +61,7 @@ func printText(out io.Writer, result Result) {
 		table := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 		fmt.Fprintln(table, "ID\tNAME\tSTATUS")
 		for _, item := range items {
-			fmt.Fprintf(table, "%s\t%s\t%s\n", textValue(str(item["id"])), textValue(str(item["display_name"])), textValue(str(item["status"])))
+			fmt.Fprintf(table, "%s\t%s\t%s\n", textValue(str(item["id"])), textValue(str(item["name"])), textValue(str(item["status"])))
 		}
 		table.Flush()
 	case "unlink":
