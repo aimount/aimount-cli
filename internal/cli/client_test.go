@@ -282,7 +282,9 @@ func TestConsumedResponseShapesAreTolerantAndPrivate(t *testing.T) {
 		{"/v0/projects/prj_0123456789ABCDEF", `{"id":"prj_0123456789ABCDEF","slug":"example_project","name":"Safe Project","status":"active","future_secret":"never-output"}`, `{"id":"prj_0123456789ABCDEF","name":"Safe Project","slug":"example_project","status":"active"}`},
 		{"/v0/projects/prj_0123456789ABCDEF", `{"id":"prj_0000000000000001","slug":"example_project","name":"Safe Project","status":"active"}`, ""},
 		{"/v0/projects/prj_0123456789ABCDEF", `{"id":"prj_0123456789ABCDEF","name":"example_project","display_name":"Safe Project","status":"active"}`, ""},
-		{"/v0/organizations", `{"items":[{"id":"org_0123456789ABCDEF","slug":"example_org","name":"Safe Organization","future_secret":"never-output"}]}`, `{"items":[{"id":"org_0123456789ABCDEF","name":"Safe Organization","slug":"example_org"}]}`},
+		{"/v0/organizations", `{"items":[{"id":"org_0123456789ABCDEF","slug":"example_org","name":"Safe Organization","future_secret":"never-output"}],"next_cursor":null}`, `{"items":[{"id":"org_0123456789ABCDEF","name":"Safe Organization","slug":"example_org"}],"next_cursor":null}`},
+		{"/v0/organizations", `{"items":[]}`, ""},
+		{"/v0/organizations", `{"items":[],"next_cursor":""}`, ""},
 		{"/v0/auth/identity", `{"principal":{"type":"user","user_id":"usr_0123456789ABCDEF","display_name":{"private":"never-output"}},"authentication":{"method":"pat"}}`, ""},
 	} {
 		s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(tc.body)) }))
@@ -610,5 +612,33 @@ func TestApplicationReadSetIdentityAndCoverage(t *testing.T) {
 	m["credentials"] = append(list(m["credentials"]), object{"kind": "application", "id": "app_0123456789ABCDEF", "slug": "product", "target": "runtime", "version": 1})
 	if _, err := projectReadSet(m); err == nil {
 		t.Fatal("runtime key included in Stack read-set")
+	}
+}
+
+func TestDiscoveryPaginationStopsAtNull(t *testing.T) {
+	const path = "/v0/organizations"
+	const opaque = "opaque +/?&="
+	var requests atomic.Int32
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch requests.Add(1) {
+		case 1:
+			if r.URL.Path != path || r.URL.RawQuery != "" {
+				t.Errorf("unexpected first request %s", r.URL)
+			}
+			io.WriteString(w, `{"items":[{"id":"org_0123456789ABCDEF","slug":"first","name":"First"}],"next_cursor":"`+opaque+`"}`)
+		case 2:
+			if r.URL.Path != path || r.URL.Query().Get("cursor") != opaque {
+				t.Errorf("continuation changed: %s", r.URL)
+			}
+			io.WriteString(w, `{"items":[{"id":"org_1123456789ABCDEF","slug":"last","name":"Last"}],"next_cursor":null}`)
+		default:
+			t.Error("unexpected request after terminal page")
+			w.WriteHeader(500)
+		}
+	}))
+	defer s.Close()
+	items, err := newClient(s.URL, "synthetic").pages(context.Background(), path)
+	if err != nil || len(items) != 2 || requests.Load() != 2 {
+		t.Fatal(items, requests.Load(), err)
 	}
 }

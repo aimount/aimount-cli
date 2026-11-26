@@ -188,7 +188,7 @@ func TestHumanOutputFromCommands(t *testing.T) {
 		case "/v0/organizations/org_0123456789ABCDEF":
 			w.Write([]byte(`{"id":"org_0123456789ABCDEF","slug":"demo_org","name":"Demo"}`))
 		case "/v0/organizations/org_0123456789ABCDEF/projects":
-			w.Write([]byte(`{"items":[{"id":"prj_0123456789ABCDEF","slug":"example_project","name":"Pet Care\u001b[31m\nInjected","status":"active"}]}`))
+			w.Write([]byte(`{"items":[{"id":"prj_0123456789ABCDEF","slug":"example_project","name":"Pet Care\u001b[31m\nInjected","status":"active"}],"next_cursor":null}`))
 		case "/v0/projects/prj_0123456789ABCDEF":
 			w.Write([]byte(`{"id":"prj_0123456789ABCDEF","slug":"example_project","name":"Pet Care","status":"active"}`))
 		default:

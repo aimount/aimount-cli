@@ -641,7 +641,7 @@ func TestExecutableDeviceValidatedHTTPSAndCancelledInFlight(t *testing.T) {
 				case "/v0/auth/identity":
 					io.WriteString(w, `{"principal":{"type":"user","user_id":"usr_0123456789ABCDEF"},"authentication":{"method":"pat"}}`)
 				case "/v0/organizations":
-					io.WriteString(w, `{"items":[]}`)
+					io.WriteString(w, `{"items":[],"next_cursor":null}`)
 				default:
 					w.WriteHeader(404)
 				}
