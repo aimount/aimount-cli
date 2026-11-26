@@ -214,6 +214,11 @@ positions, plus the effective Model set of local Agents that inherit
 removing a key or Plan keeps Sessions, history and accounting, while tokens and
 queued inputs bound to a removed Plan are refused.
 
+Model Nodes with `provider: openai_compatible` and `api: chat_completions` may set
+`thinking: disabled` or `output_token_parameter: max_tokens`, independently.
+Other providers/APIs reject both fields. Omission keeps the provider's thinking
+default and uses `max_completion_tokens` for compatible Chat Completions. Pull
+preserves explicit values without writing defaults; plan shows edits to either.
 Model credentials use `{api_key: {from_env: VARIABLE}}` or `{none: {}}`.
 A `server_webhook` Contract's optional `webhook` holds only `timeout_seconds`
 (1..30, default 10) and `invocation_name`; it has no URL, auth or token.
@@ -236,7 +241,12 @@ prune; it does not erase conversations. Physical cleanup remains asynchronous.
 Stack requests and export require an explicit `applications` array, even when
 empty, alongside `models`, `tools` and `agents`. Applications also participate in
 the complete identity bindings and resource ETag read-set; runtime keys, Users
-and Sessions never enter Stack configuration. Older incomplete Stack graphs are
+and Sessions never enter Stack configuration. Storages are referenced by slug,
+not managed or pruned by Stack. Reviewed bindings preserve the stable `sto_` ID,
+even for unused Storages; replacing a Storage under its slug requires a new plan.
+Pair the corrected API with a CLI that accepts `storage` bindings: older CLIs
+can reject these responses even if the authored files reference no Storage.
+Older incomplete Stack graphs are
 not partial-management inputs for this CLI/API contract. The former address
 `name` and `spec.display_name` fields are not accepted for the managed resources:
 use matching API and CLI versions. `pull --force` refuses to replace managed

@@ -480,6 +480,25 @@ func TestRemoteSpecRejectsMalformedConsumedFieldsInExportAndPlan(t *testing.T) {
 	}
 }
 
+func TestRemoteModelNodeOptionsInExportAndPlan(t *testing.T) {
+	const spec = `{"name":"Safe","limits":{"context_window_tokens":8192,"max_output_tokens":1024},"capabilities":{"input_modalities":["text"],"output_modalities":["text"],"tool_calling":false},"nodes":[{"name":"safe","display_name":"Safe","model":"test","credentials":{"mode":"none"},"base_url":"https://provider.example/v1","provider":"openai_compatible","api":"chat_completions","thinking":"disabled","output_token_parameter":"max_tokens"}]}`
+	for _, field := range []string{"", "before", "after"} {
+		if _, err := remoteSpecResponse(t, "model", spec, field); err != nil {
+			t.Fatal("valid Node options rejected", field, err)
+		}
+		for from, to := range map[string]string{
+			`"disabled"`:          `"enabled"`,
+			`"max_tokens"`:        `"max_completion_tokens"`,
+			`"chat_completions"`:  `"responses"`,
+			`"openai_compatible"`: `"openai"`,
+		} {
+			if _, err := remoteSpecResponse(t, "model", strings.Replace(spec, from, to, 1), field); err == nil {
+				t.Errorf("invalid Node option accepted: field=%q changed %s to %s", field, from, to)
+			}
+		}
+	}
+}
+
 func TestExportRefusesMalformedConsumedNodes(t *testing.T) {
 	for _, nodes := range []string{`null`, `[null]`, `[42]`, `[{"name":"primary","credentials":{"mode":"api_key"},"enabled":"false"}]`} {
 		body := `{"version":1,"models":[{"slug":"smart","spec":{"name":"Smart","nodes":` + nodes + `}}],"tools":[],"agents":[],"applications":[]}`
@@ -548,6 +567,7 @@ func TestApplicationTransportCompleteGraphAndSafeProjection(t *testing.T) {
 		{"duplicate resources", "GET", "/stack", `{"version":1,"models":[],"tools":[],"agents":[],"applications":[{"slug":"product","spec":{"name":"Product","models":{},"agents":{}}},{"slug":"product","spec":{"name":"Other","models":{},"agents":{}}}]}`, false},
 		{"unknown description", "GET", "/stack", `{"version":1,"models":[],"tools":[],"agents":[],"applications":[{"slug":"product","spec":{"name":"Product","models":{},"agents":{},"description":{"private":"never-output"}}}]}`, true},
 		{"binding", "GET", "/stack/bindings", `{"version":1,"bindings":[{"kind":"application","slug":"product","id":"app_0123456789ABCDEF","future_secret":"never-output"}]}`, true},
+		{"locator binding keeps opaque managed ID", "GET", "/stack/bindings", `{"version":1,"bindings":[{"kind":"application","slug":"product","id":"opaque"}]}`, true},
 		{"plan", "POST", "/stack/plan", `{"version":1,"read_set":` + validReadSetJSON + `,"changes":[{"kind":"application","slug":"product","operation":"UPDATE","before":{"agents":{}},"after":{"agents":{"main":{"agent":{"slug":"main","future_secret":"never-output"}}}}}]}`, true},
 		{"apply", "POST", "/stack/apply", `{"version":1,"changed":true,"resources":[{"kind":"application","id":"app_0123456789ABCDEF","etag":"opaque","version":1,"revision":1,"operation":"CREATE","changed":true,"future_secret":"never-output"}]}`, true},
 	} {
@@ -602,6 +622,12 @@ func TestApplicationReadSetIdentityAndCoverage(t *testing.T) {
 	if err != nil || strings.Contains(wire(out), "never-output") {
 		t.Fatal("valid Application read-set rejected", err)
 	}
+	binding := obj(list(m["bindings"])[1])
+	binding["id"] = "opaque"
+	if _, err := projectReadSet(m); err == nil {
+		t.Fatal("accepted an opaque Application binding ID in the read set")
+	}
+	binding["id"] = "app_0123456789ABCDEF"
 	obj(list(m["resources"])[1])["id"] = "agt_0123456789ABCDEF"
 	if _, err := projectReadSet(m); err == nil {
 		t.Fatal("invalid Application ID accepted")
@@ -611,4 +637,53 @@ func TestApplicationReadSetIdentityAndCoverage(t *testing.T) {
 	if _, err := projectReadSet(m); err == nil {
 		t.Fatal("runtime key included in Stack read-set")
 	}
+}
+
+func TestStorageBindingReaders(t *testing.T) {
+	const binding = `{"kind":"storage","slug":"docs","id":"sto_0123456789ABCDEF"}`
+	for _, tc := range []struct {
+		method, endpoint, response, field string
+	}{
+		{"GET", "/stack/bindings", `{"version":1,"bindings":[` + binding + `]}`, ""},
+		{"POST", "/stack/plan", `{"version":1,"read_set":` + strings.Replace(validReadSetJSON, `"bindings":[`, `"bindings":[`+binding+`,`, 1) + `,"changes":[]}`, "read_set"},
+	} {
+		t.Run(tc.endpoint, func(t *testing.T) {
+			for _, id := range []string{"sto_0123456789ABCDEF", "mdl_0123456789ABCDEF"} {
+				body := strings.Replace(tc.response, "sto_0123456789ABCDEF", id, 1)
+				body = strings.Replace(body, `"kind":"storage"`, `"kind":"storage","future_secret":"never-output"`, 1)
+				s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, body) }))
+				c := newClient(s.URL, "synthetic")
+				out, err := c.request(context.Background(), tc.method, "/v0/projects/prj_0123456789ABCDEF"+tc.endpoint, "", "")
+				c.http.CloseIdleConnections()
+				s.Close()
+				if strings.HasPrefix(id, "mdl_") {
+					if err == nil {
+						t.Fatal("accepted a Model ID as a Storage binding")
+					}
+					continue
+				}
+				if tc.field != "" {
+					out = obj(out[tc.field])
+				}
+				items := list(out["bindings"])
+				if err != nil || len(items) == 0 || wire(items[0]) != `{"id":"sto_0123456789ABCDEF","kind":"storage","slug":"docs"}` {
+					t.Fatal("reviewed Storage binding not preserved", err, wire(out))
+				}
+			}
+		})
+	}
+	t.Run("not managed", func(t *testing.T) {
+		for _, field := range []string{"resources", "credentials"} {
+			v, err := decodeJSON([]byte(validReadSetJSON), false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := obj(v)
+			entry := obj(list(m[field])[0])
+			entry["kind"], entry["id"] = "storage", "sto_0123456789ABCDEF"
+			if _, err := projectReadSet(m); err == nil {
+				t.Fatalf("accepted managed Storage condition under %s", field)
+			}
+		}
+	})
 }

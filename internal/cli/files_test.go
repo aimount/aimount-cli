@@ -176,6 +176,56 @@ spec:
 	}
 }
 
+func TestAuthoredModelNodeProviderOptions(t *testing.T) {
+	for _, route := range []struct {
+		name, yaml string
+	}{
+		{"native OpenAI", modelYAML},
+		{"compatible Responses", strings.Replace(modelYAML, "provider: openai\n", "provider: openai_compatible\n      api: responses\n      base_url: https://provider.example/v1\n", 1)},
+		{"compatible Chat Completions", strings.Replace(modelYAML, "provider: openai\n", "provider: openai_compatible\n      api: chat_completions\n      base_url: https://provider.example/v1\n", 1)},
+	} {
+		for _, tc := range []struct {
+			field, value string
+			valid        bool
+		}{
+			{"thinking", "disabled", true},
+			{"output_token_parameter", "max_tokens", true},
+			{"thinking", "enabled", false},
+			{"output_token_parameter", "max_completion_tokens", false},
+			{"thinking", "null", false},
+			{"output_token_parameter", "null", false},
+			{"thinking", `""`, false},
+			{"output_token_parameter", `""`, false},
+			{"thinking", "false", false},
+			{"output_token_parameter", "1", false},
+		} {
+			chat := route.name == "compatible Chat Completions"
+			if !chat && !tc.valid {
+				continue
+			}
+			t.Run(route.name+"/"+tc.field+"="+tc.value, func(t *testing.T) {
+				root := t.TempDir()
+				yaml := strings.Replace(route.yaml, "      model:", "      "+tc.field+": "+tc.value+"\n      model:", 1)
+				writeFiles(t, root, map[string]string{"models/smart.yaml": yaml})
+				g, err := load(root, nil, false)
+				if !tc.valid || !chat {
+					if err == nil {
+						t.Fatal("accepted invalid authored Model Node field")
+					}
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				node := objects(obj(g.Models[0]["spec"])["nodes"])[0]
+				if node[tc.field] != tc.value || len(fields(node, "thinking", "output_token_parameter")) != 1 {
+					t.Fatal("desired Node lost its setting or supplied a default", node)
+				}
+			})
+		}
+	}
+}
+
 func TestStrictSpecMappingAndPrivateYAMLDiagnostics(t *testing.T) {
 	for _, spec := range []string{"[name]", "42", "{credential: synthetic-private-value}"} {
 		root := t.TempDir()
