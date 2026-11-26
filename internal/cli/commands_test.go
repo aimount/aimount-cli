@@ -26,12 +26,12 @@ func TestCommandsPlanApplyNoAutoRetryAndState(t *testing.T) {
 		case r.URL.Path == "/v0/auth/identity":
 			w.Write([]byte(`{"principal":{"type":"user","user_id":"usr_0123456789ABCDEF"},"authentication":{"method":"pat"}}`))
 		case r.URL.Path == "/v0/projects/prj_0123456789ABCDEF":
-			w.Write([]byte(`{"id":"prj_0123456789ABCDEF","status":"active","display_name":"Synthetic"}`))
+			w.Write([]byte(`{"id":"prj_0123456789ABCDEF","slug":"example_project","status":"active","name":"Synthetic"}`))
 		case strings.HasSuffix(r.URL.Path, "/stack/bindings"):
 			w.Write([]byte(`{"version":1,"bindings":[]}`))
 		case strings.HasSuffix(r.URL.Path, "/stack/plan"):
 			plans++
-			w.Write([]byte(`{"version":1,"read_set":` + validReadSetJSON + `,"changes":[{"kind":"model","name":"smart","operation":"CREATE"}]}`))
+			w.Write([]byte(`{"version":1,"read_set":` + validReadSetJSON + `,"changes":[{"kind":"model","slug":"smart","operation":"CREATE"}]}`))
 		case strings.HasSuffix(r.URL.Path, "/stack/apply"):
 			writes++
 			if !strings.HasPrefix(r.Header.Get("Idempotency-Key"), "s1.") {
@@ -107,7 +107,7 @@ func TestPromptSignalCancellationIsBounded(t *testing.T) {
 }
 
 func TestSemanticInstructionAndToolSet(t *testing.T) {
-	out := semantic(object{"changes": []any{object{"kind": "agent", "name": "support", "operation": "UPDATE", "before": object{"instruction": "Old", "tools": []any{object{"name": "lookup", "contract": "v1"}}}, "after": object{"instruction": "New\x1b", "tools": []any{object{"name": "lookup", "contract": "v2"}}}}}})
+	out := semantic(object{"changes": []any{object{"kind": "agent", "slug": "support", "operation": "UPDATE", "before": object{"instruction": "Old", "tools": []any{object{"slug": "lookup", "contract": "v1"}}}, "after": object{"instruction": "New\x1b", "tools": []any{object{"slug": "lookup", "contract": "v2"}}}}}})
 	for _, s := range []string{"lookup@v1", "lookup@v2", "--- saved\n+++ desired", "\\u001b"} {
 		if !strings.Contains(out, s) {
 			t.Errorf("missing %s", s)
@@ -124,7 +124,7 @@ func TestExactSchemaPullRoundTrip(t *testing.T) {
 		t.Fatal(e)
 	}
 	g := emptyGraph()
-	g.Tools = []object{{"name": "lookup", "spec": object{"display_name": "Lookup", "enabled": true, "current_contract": "v1", "contracts": []any{object{"name": "v1", "description": "Lookup", "type": "client", "input_schema": object{"type": "object", "additionalProperties": false}, "output_schema": schema}}}}}
+	g.Tools = []object{{"slug": "lookup", "spec": object{"name": "Lookup", "enabled": true, "current_contract": "v1", "contracts": []any{object{"name": "v1", "description": "Lookup", "type": "client", "input_schema": object{"type": "object", "additionalProperties": false}, "output_schema": schema}}}}}
 	files, e := render(g, nil)
 	if e != nil {
 		t.Fatal(e)
@@ -142,8 +142,8 @@ func TestExactSchemaPullRoundTrip(t *testing.T) {
 
 func TestPullLocatorAliasIdentityAndAmbiguity(t *testing.T) {
 	g := emptyGraph()
-	g.Models = []object{{"name": "smart"}}
-	bindings := []object{{"kind": "model", "name": "old_smart", "id": "mdl_0000000000000001"}, {"kind": "model", "name": "smart", "id": "mdl_0000000000000001"}}
+	g.Models = []object{{"slug": "smart"}}
+	bindings := []object{{"kind": "model", "slug": "old_smart", "id": "mdl_0000000000000001"}, {"kind": "model", "slug": "smart", "id": "mdl_0000000000000001"}}
 	locs := map[string]string{"model/old_smart/primary/key": "MY_KEY"}
 	out, e := pullLocators(g, locs, bindings)
 	if e != nil || out["model/smart/primary/key"] != "MY_KEY" {
@@ -159,14 +159,14 @@ func TestPullLocatorAliasIdentityAndAmbiguity(t *testing.T) {
 
 func TestExportPlanToolsBelongToLocalAgent(t *testing.T) {
 	g := emptyGraph()
-	g.Tools = []object{{"name": "lookup", "spec": object{}}, {"name": "other", "spec": object{}}}
-	g.Agents = []object{{"name": "support", "spec": object{"tools": []any{object{"name": "lookup"}}}}}
-	rule := object{"tools": object{"allowed": []any{object{"name": "lookup"}}}}
-	g.Applications = []object{{"name": "product", "spec": object{"models": object{}, "agents": object{"main": object{"agent": object{"name": "support"}}}, "plans": object{"plus": object{"agents": object{"main": rule}}}}}}
+	g.Tools = []object{{"slug": "lookup", "spec": object{}}, {"slug": "other", "spec": object{}}}
+	g.Agents = []object{{"slug": "support", "spec": object{"tools": []any{object{"slug": "lookup"}}}}}
+	rule := object{"tools": object{"allowed": []any{object{"slug": "lookup"}}}}
+	g.Applications = []object{{"slug": "product", "spec": object{"models": object{}, "agents": object{"main": object{"agent": object{"slug": "support"}}}, "plans": object{"plus": object{"agents": object{"main": rule}}}}}}
 	if e := validateExportGraph(g); e != nil {
 		t.Fatal(e)
 	}
-	rule["tools"] = object{"allowed": []any{object{"name": "other"}}}
+	rule["tools"] = object{"allowed": []any{object{"slug": "other"}}}
 	if e := validateExportGraph(g); e == nil || !strings.Contains(e.Error(), "Plan plus Tool other is not a Tool of local Agent main") {
 		t.Fatal("Plan Tool outside the local Agent accepted", e)
 	}
@@ -176,11 +176,11 @@ func TestActualPullPreservesLocatorsThroughAliasAndDetectsChangedBindings(t *tes
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	g := emptyGraph()
-	g.Applications = []object{{"name": "product", "archived": true, "spec": object{"display_name": "Product", "models": object{}, "agents": object{}, "tool_endpoint": object{"url_source": "env"}}}}
+	g.Applications = []object{{"slug": "product", "archived": true, "spec": object{"name": "Product", "models": object{}, "agents": object{}, "tool_endpoint": object{"url_source": "env"}}}}
 	local := emptyGraph()
 	local.Applications = []object{maps.Clone(g.Applications[0])}
-	local.Applications[0]["name"] = "old_product"
-	bindings := []any{object{"kind": "application", "name": "product", "id": "app_0000000000000001"}, object{"kind": "application", "name": "old_product", "id": "app_0000000000000001"}}
+	local.Applications[0]["slug"] = "old_product"
+	bindings := []any{object{"kind": "application", "slug": "product", "id": "app_0000000000000001"}, object{"kind": "application", "slug": "old_product", "id": "app_0000000000000001"}}
 	for _, changed := range []bool{false, true} {
 		root := t.TempDir()
 		files, e := render(local, map[string]string{"application/old_product/tool_endpoint/url": "MY_URL"})
@@ -195,12 +195,12 @@ func TestActualPullPreservesLocatorsThroughAliasAndDetectsChangedBindings(t *tes
 			case r.URL.Path == "/v0/auth/identity":
 				io.WriteString(w, `{"principal":{"type":"user","user_id":"usr_0123456789ABCDEF"},"authentication":{"method":"pat"}}`)
 			case r.URL.Path == "/v0/projects/prj_0123456789ABCDEF":
-				io.WriteString(w, `{"id":"prj_0123456789ABCDEF","status":"active","display_name":"Safe"}`)
+				io.WriteString(w, `{"id":"prj_0123456789ABCDEF","slug":"example_project","status":"active","name":"Safe"}`)
 			case strings.HasSuffix(r.URL.Path, "/stack/bindings"):
 				reads++
 				bs := append([]any{}, bindings...)
 				if changed && reads == 2 {
-					bs[1] = object{"kind": "application", "name": "old_product", "id": "app_0000000000000002"}
+					bs[1] = object{"kind": "application", "slug": "old_product", "id": "app_0000000000000002"}
 				}
 				io.WriteString(w, wire(object{"version": 1, "bindings": bs}))
 			case strings.HasSuffix(r.URL.Path, "/stack"):
@@ -267,13 +267,13 @@ func TestPullUnsupportedGoRegexpPreservesOriginalRoot(t *testing.T) {
 				unsupported = object{"patternProperties": object{"(?=synthetic-private)": object{}}}
 			}
 			g := emptyGraph()
-			g.Tools = []object{{"name": "lookup", "spec": object{"display_name": "Lookup", "enabled": true, "current_contract": "v1", "contracts": []any{object{"name": "v1", "description": "Lookup", "type": "client", "input_schema": object{"type": "object", "additionalProperties": false}, "output_schema": unsupported}}}}}
+			g.Tools = []object{{"slug": "lookup", "spec": object{"name": "Lookup", "enabled": true, "current_contract": "v1", "contracts": []any{object{"name": "v1", "description": "Lookup", "type": "client", "input_schema": object{"type": "object", "additionalProperties": false}, "output_schema": unsupported}}}}}
 			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
 				case r.URL.Path == "/v0/auth/identity":
 					io.WriteString(w, `{"principal":{"type":"user","user_id":"usr_0123456789ABCDEF"},"authentication":{"method":"pat"}}`)
 				case r.URL.Path == "/v0/projects/prj_0123456789ABCDEF":
-					io.WriteString(w, `{"id":"prj_0123456789ABCDEF","status":"active","display_name":"Safe"}`)
+					io.WriteString(w, `{"id":"prj_0123456789ABCDEF","slug":"example_project","status":"active","name":"Safe"}`)
 				case strings.HasSuffix(r.URL.Path, "/stack/bindings"):
 					io.WriteString(w, `{"version":1,"bindings":[]}`)
 				case strings.HasSuffix(r.URL.Path, "/stack"):
@@ -313,13 +313,13 @@ func TestActualPullPreservesSchemaScalarMeaning(t *testing.T) {
 	root := t.TempDir()
 	schema := object{"type": "object", "properties": object{"string": object{"const": "1e400"}, "1_000": object{"const": "-0x10"}, "large_hex": object{"const": json.Number("18446744073709551616")}, "numeric": object{"const": json.Number("9007199254740993")}, "1e400": object{"const": "null"}}}
 	g := emptyGraph()
-	g.Tools = []object{{"name": "lookup", "spec": object{"display_name": "Lookup", "enabled": true, "current_contract": "v1", "contracts": []any{object{"name": "v1", "description": "Lookup", "type": "client", "input_schema": object{"type": "object", "additionalProperties": false}, "output_schema": schema}}}}}
+	g.Tools = []object{{"slug": "lookup", "spec": object{"name": "Lookup", "enabled": true, "current_contract": "v1", "contracts": []any{object{"name": "v1", "description": "Lookup", "type": "client", "input_schema": object{"type": "object", "additionalProperties": false}, "output_schema": schema}}}}}
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/v0/auth/identity":
 			io.WriteString(w, `{"principal":{"type":"user","user_id":"usr_0123456789ABCDEF"},"authentication":{"method":"pat"}}`)
 		case r.URL.Path == "/v0/projects/prj_0123456789ABCDEF":
-			io.WriteString(w, `{"id":"prj_0123456789ABCDEF","status":"active","display_name":"Safe"}`)
+			io.WriteString(w, `{"id":"prj_0123456789ABCDEF","slug":"example_project","status":"active","name":"Safe"}`)
 		case strings.HasSuffix(r.URL.Path, "/stack"):
 			io.WriteString(w, wire(g))
 		default:
@@ -351,7 +351,7 @@ func TestActualPullPreservesSchemaScalarMeaning(t *testing.T) {
 }
 
 func TestExportApplicationCompleteReferencesAndLifecycle(t *testing.T) {
-	local := func(agent string) object { return object{"agent": object{"name": agent}} }
+	local := func(agent string) object { return object{"agent": object{"slug": agent}} }
 	for _, tc := range []struct {
 		name                                     string
 		models, agents                           object
@@ -359,7 +359,7 @@ func TestExportApplicationCompleteReferencesAndLifecycle(t *testing.T) {
 	}{
 		{"empty", object{}, object{}, false, false, false, true},
 		{"server dependency is not local", object{}, object{"main": local("main")}, false, false, false, false},
-		{"Model must be local", object{"fast": object{"model": object{"name": "economy"}}}, object{}, true, false, false, false},
+		{"Model must be local", object{"fast": object{"model": object{"slug": "economy"}}}, object{}, true, false, false, false},
 		{"export must use primary names", object{}, object{"main": local("old_main")}, true, false, false, false},
 		{"one Agent under several keys", object{}, object{"main": local("main"), "form": local("main")}, true, false, false, true},
 		{"active uses archived", object{}, object{"main": local("main")}, true, true, false, false},
@@ -377,7 +377,7 @@ func TestExportApplicationCompleteReferencesAndLifecycle(t *testing.T) {
 			obj(a["spec"])["models"] = tc.models
 			obj(a["spec"])["agents"] = tc.agents
 			if tc.local {
-				g.Agents = []object{{"name": "main", "archived": tc.agentArchived, "spec": object{"tools": []any{}}}}
+				g.Agents = []object{{"slug": "main", "archived": tc.agentArchived, "spec": object{"tools": []any{}}}}
 			}
 			err = validateExportGraph(g)
 			if (err == nil) != tc.valid {
@@ -388,7 +388,7 @@ func TestExportApplicationCompleteReferencesAndLifecycle(t *testing.T) {
 }
 
 func TestApplicationSemanticSetsAndAccurateErasureScope(t *testing.T) {
-	ref := func(name string) object { return object{"name": name} }
+	ref := func(name string) object { return object{"slug": name} }
 	before := object{
 		"models": object{"fast": object{"model": ref("economy")}},
 		"agents": object{"main": object{"agent": ref("main_assistant")}, "form": object{"agent": ref("form_assistant"), "models": []any{"fast"}}},
@@ -407,15 +407,15 @@ func TestApplicationSemanticSetsAndAccurateErasureScope(t *testing.T) {
 		},
 	}
 	plan := object{"changes": []any{
-		object{"kind": "application", "name": "product", "operation": "DELETE", "runtime_cascade": true},
-		object{"kind": "agent", "name": "old", "operation": "DELETE", "erasure_scope": []any{"configuration"}},
-		object{"kind": "application", "name": "other", "operation": "UPDATE", "before": before, "after": after},
+		object{"kind": "application", "slug": "product", "operation": "DELETE", "runtime_cascade": true},
+		object{"kind": "agent", "slug": "old", "operation": "DELETE", "erasure_scope": []any{"configuration"}},
+		object{"kind": "application", "slug": "other", "operation": "UPDATE", "before": before, "after": after},
 	}}
 	out := semantic(plan)
 	for _, want := range []string{
-		`models.smart: null → {"model":{"name":"reasoning"}}`,
+		`models.smart: null → {"model":{"slug":"reasoning"}}`,
 		`default_model: null → "fast"`,
-		`agents.main.storages: null → [{"name":"docs"}]`,
+		`agents.main.storages: null → [{"slug":"docs"}]`,
 		`agents.main.memory: null → "read"`,
 		`effective agents.main.models: +["smart"] -[]`,
 		`plans.old: {} → null`,
@@ -470,13 +470,13 @@ func TestApplicationWholeProjectPruneReadSetAndEmptyGuards(t *testing.T) {
 				writeFiles(t, root, map[string]string{path: definition})
 			}
 			plans, writes := 0, 0
-			binding := object{"kind": "application", "name": "saved", "id": "app_0123456789ABCDEF"}
+			binding := object{"kind": "application", "slug": "saved", "id": "app_0123456789ABCDEF"}
 			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
 				case r.URL.Path == "/v0/auth/identity":
 					io.WriteString(w, `{"principal":{"user_id":"usr_0123456789ABCDEF"},"authentication":{"method":"pat"}}`)
 				case r.URL.Path == "/v0/projects/prj_0123456789ABCDEF":
-					io.WriteString(w, `{"id":"prj_0123456789ABCDEF","status":"active","display_name":"Safe"}`)
+					io.WriteString(w, `{"id":"prj_0123456789ABCDEF","slug":"example_project","status":"active","name":"Safe"}`)
 				case strings.HasSuffix(r.URL.Path, "/stack/plan"):
 					plans++
 					if tc.want == "stack_prune_required" {

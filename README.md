@@ -111,27 +111,29 @@ agents/*/instruction.md
 applications/*.yaml
 ```
 
-Every YAML envelope contains `version: 1`, lowercase `kind`, technical `name`,
-optional parent `archived`, and `spec`. Agents describe behavior only:
-`display_name`, optional `description`, and Tools as names or `{name, contract}`.
-Tool `current_contract` selects a discovered `tool_contract`. Models and Plans
+Model, Tool, Agent and Application YAML envelopes contain `version: 1`, lowercase
+`kind`, `slug`, optional `archived`, and `spec`. The slug identifies the resource
+in URL or YAML references; `spec.name` is its human-readable name. Agents have an
+optional `description`, and refer to Tools by slug or `{slug, contract}`.
+Nested `tool_contract` envelopes still use `name`, which Tool `current_contract`
+selects. Model Node `name` and `display_name` are unchanged. Models and Plans
 belong to Applications. Agent `spec.models`, `agents/*/policies/` directories and
 Application `agents` reference arrays from the previous format fail with a
 diagnostic; nothing is converted, so move them into `applications/*.yaml` by hand.
 
-Applications use `kind: application`, an immutable technical name and a `spec`
-with `display_name`, `models` and `agents` dictionaries, optional `default_model`,
+Applications use `kind: application`, a `slug`, and a `spec` with `name`,
+`models` and `agents` dictionaries, optional `default_model`,
 and optional `plans` with `default_plan`. Dictionary keys are Application-local
 (`^[a-z][a-z0-9_]{0,62}$`, at most 100 each, no rename or aliases); values refer
-to Project Models, Agents, Storages and Tools by technical name. One Project Agent
+to Project Models, Agents, Storages and Tools by slug. One Project Agent
 may appear under several local keys with different settings.
 
 ```yaml
 version: 1
 kind: application
-name: paperdesk
+slug: paperdesk
 spec:
-  display_name: Paperdesk Assistant
+  name: Paperdesk Assistant
   models:
     fast:
       model: economy_model
@@ -224,8 +226,8 @@ genuine fractions before conversion; schema numeric tokens remain exact.
 `project.yaml` is unsupported for plan/apply and preserved by pull. All discovered
 resources are authoritative: omitted saved parents need explicit irreversible
 `--prune`, independent of approval. Renames remain Console/API operations;
-existing aliases are resolved through fresh server bindings.
-Applications have no aliases: changing their name declares a different resource.
+existing aliases are resolved through fresh server bindings. Editing a `slug` in
+YAML does not rename a resource. Pull writes current primary slugs.
 Application omission requires `--prune` and authorizes erasure of its Users,
 conversations, files and configuration. Agent prune erases only its configuration,
 preserving ordinary Application history. Removing a local Agent key needs no
@@ -235,7 +237,12 @@ Stack requests and export require an explicit `applications` array, even when
 empty, alongside `models`, `tools` and `agents`. Applications also participate in
 the complete identity bindings and resource ETag read-set; runtime keys, Users
 and Sessions never enter Stack configuration. Older incomplete Stack graphs are
-not partial-management inputs for this CLI/API contract.
+not partial-management inputs for this CLI/API contract. The former address
+`name` and `spec.display_name` fields are not accepted for the managed resources:
+use matching API and CLI versions. `pull --force` refuses to replace managed
+resource YAML with either old field. Manually rename root `name` to `slug` and
+`spec.display_name` to `spec.name` where present, keep `from_env` locators
+unchanged, then retry.
 
 Tool Schema `pattern` and every `patternProperties` key use the Go standard
 library [`regexp` syntax](https://pkg.go.dev/regexp/syntax), not ECMAScript.
@@ -279,7 +286,7 @@ Different managed paths that resolve to the same physical file (case-only aliase
 on macOS or hard links) are refused before publication. Rename such files to an
 unambiguous temporary spelling before pulling; CLI does not guess a case-only
 rename or weaken recovery conflict checks. Resource identity still comes from the
-authored technical name, not its filename.
+authored slug, not its filename.
 
 An interrupted publication leaves `.aimount/pull` with before-state backups and a
 journal. Ordinary pull/plan/apply refuse that state. Run `aimount pull --recover`

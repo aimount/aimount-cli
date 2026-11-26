@@ -236,10 +236,10 @@ func text(v any, limit int, path string, required bool) {
 		fail(path, "invalid text")
 	}
 }
-func display(m object, path string) {
-	text(m["display_name"], 1024, path, true)
-	if utf8.RuneCountInString(str(m["display_name"])) > 256 {
-		fail(path, "display_name too long")
+func display(m object, field, path string) {
+	text(m[field], 1024, path, true)
+	if utf8.RuneCountInString(str(m[field])) > 256 {
+		fail(path, field+" too long")
 	}
 	if v, ok := m["description"]; ok {
 		text(v, 16384, path, false)

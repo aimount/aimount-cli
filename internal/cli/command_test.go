@@ -128,7 +128,7 @@ func TestUnknownRootCommandKeepsValidationCode(t *testing.T) {
 }
 
 func TestAllHumanSummaries(t *testing.T) {
-	target := object{"api": "https://api.example.test", "project": object{"id": "prj_0123456789ABCDEF", "display_name": "Pet Care"}}
+	target := object{"api": "https://api.example.test", "project": object{"id": "prj_0123456789ABCDEF", "name": "Pet Care"}}
 	for _, tc := range []struct {
 		result Result
 		want   string
@@ -186,11 +186,11 @@ func TestHumanOutputFromCommands(t *testing.T) {
 		case "/v0/auth/identity":
 			w.Write([]byte(`{"principal":{"type":"user","user_id":"usr_0123456789ABCDEF"},"authentication":{"method":"pat"}}`))
 		case "/v0/organizations/org_0123456789ABCDEF":
-			w.Write([]byte(`{"id":"org_0123456789ABCDEF","name":"Demo"}`))
+			w.Write([]byte(`{"id":"org_0123456789ABCDEF","slug":"demo_org","name":"Demo"}`))
 		case "/v0/organizations/org_0123456789ABCDEF/projects":
-			w.Write([]byte(`{"items":[{"id":"prj_0123456789ABCDEF","display_name":"Pet Care\u001b[31m\nInjected","status":"active"}]}`))
+			w.Write([]byte(`{"items":[{"id":"prj_0123456789ABCDEF","slug":"example_project","name":"Pet Care\u001b[31m\nInjected","status":"active"}]}`))
 		case "/v0/projects/prj_0123456789ABCDEF":
-			w.Write([]byte(`{"id":"prj_0123456789ABCDEF","display_name":"Pet Care","status":"active"}`))
+			w.Write([]byte(`{"id":"prj_0123456789ABCDEF","slug":"example_project","name":"Pet Care","status":"active"}`))
 		default:
 			w.WriteHeader(404)
 		}

@@ -11,9 +11,9 @@ import (
 
 const modelYAML = `version: 1
 kind: model
-name: smart
+slug: smart
 spec:
-  display_name: Smart
+  name: Smart
   limits: {context_window_tokens: 8192, max_output_tokens: 1024}
   capabilities: {input_modalities: [text], output_modalities: [text], tool_calling: true}
   nodes:
@@ -62,7 +62,7 @@ func TestStrictYAMLAndExactNumbers(t *testing.T) {
 
 func TestCompleteLoadBeforeSecretsAndRoundTrip(t *testing.T) {
 	root := t.TempDir()
-	writeFiles(t, root, map[string]string{"models/smart.yaml": modelYAML, "agents/support/agent.yaml": "version: 1\nkind: agent\nname: support\nspec:\n  display_name: Support\n  tools: []\n"})
+	writeFiles(t, root, map[string]string{"models/smart.yaml": modelYAML, "agents/support/agent.yaml": "version: 1\nkind: agent\nslug: support\nspec:\n  name: Support\n  tools: []\n"})
 	if _, err := load(root, map[string]string{"OPENAI_TEST": ""}, false); err == nil || !strings.Contains(err.Error(), "instruction.md") {
 		t.Fatal("missing instruction accepted", err)
 	}
@@ -148,9 +148,9 @@ func TestCanonicalPullModel(t *testing.T) {
 	}
 	want := `version: 1
 kind: model
-name: smart
+slug: smart
 spec:
-  display_name: Smart
+  name: Smart
   limits:
     context_window_tokens: 8192
     max_output_tokens: 1024
@@ -177,9 +177,9 @@ spec:
 }
 
 func TestStrictSpecMappingAndPrivateYAMLDiagnostics(t *testing.T) {
-	for _, spec := range []string{"[display_name]", "42", "{credential: synthetic-private-value}"} {
+	for _, spec := range []string{"[name]", "42", "{credential: synthetic-private-value}"} {
 		root := t.TempDir()
-		writeFiles(t, root, map[string]string{"models/smart.yaml": "version: 1\nkind: model\nname: smart\nspec: " + spec + "\n"})
+		writeFiles(t, root, map[string]string{"models/smart.yaml": "version: 1\nkind: model\nslug: smart\nspec: " + spec + "\n"})
 		_, e := load(root, nil, false)
 		if e == nil {
 			t.Fatal("non-map or unknown spec accepted")
@@ -367,9 +367,9 @@ func TestExactIntegerAndSchemaCharacterization(t *testing.T) {
 
 const applicationYAML = `version: 1
 kind: application
-name: product
+slug: product
 spec:
-  display_name: Product assistant
+  name: Product assistant
   models: {}
   agents: {}
 `
@@ -378,9 +378,9 @@ spec:
 // and sets sorted, omitted local Agent models/default_model kept omitted.
 const paperdeskYAML = `version: 1
 kind: application
-name: paperdesk
+slug: paperdesk
 spec:
-  display_name: Paperdesk Assistant
+  name: Paperdesk Assistant
   models:
     fast:
       model: economy_model
@@ -454,9 +454,9 @@ spec:
 
 const paperdeskAuthored = `version: 1
 kind: application
-name: paperdesk
+slug: paperdesk
 spec:
-  display_name: Paperdesk Assistant
+  name: Paperdesk Assistant
   models:
     smart: {model: reasoning_model}
     fast: {model: economy_model}
@@ -504,7 +504,7 @@ func TestApplicationFilesStrictFixedDepthAndCanonical(t *testing.T) {
 	root := t.TempDir()
 	writeFiles(t, root, map[string]string{"applications/renamed.yaml": applicationYAML, "applications/example/deeper.yaml": "broken", "applications/ignored.yml": "broken"})
 	g, err := load(root, nil, false)
-	if err != nil || !strings.Contains(wire(g), `"applications":[{"archived":false,"name":"product","spec":{"agents":{},"display_name":"Product assistant","models":{}}}]`) {
+	if err != nil || !strings.Contains(wire(g), `"applications":[{"archived":false,"slug":"product","spec":{"agents":{},"models":{},"name":"Product assistant"}}]`) {
 		t.Fatal("empty Application not discovered", err, wire(g))
 	}
 	i, err := inspect(root)
@@ -531,13 +531,15 @@ func TestApplicationFilesStrictFixedDepthAndCanonical(t *testing.T) {
 		strings.Replace(applicationYAML, "agents: {}", "agents: null", 1),
 		strings.Replace(applicationYAML, "agents: {}", "agents: {main: {agent: main, id: agt_0123456789ABCDEF}}", 1),
 		strings.Replace(applicationYAML, "agents: {}", "agents: {Main: {agent: main}}", 1),
-		strings.Replace(applicationYAML, "agents: {}", "agents: {main: {agent: {name: main}}}", 1),
+		strings.Replace(applicationYAML, "agents: {}", "agents: {main: {agent: {slug: main}}}", 1),
 		strings.Replace(applicationYAML, "agents: {}", "agents: {}\n  description: unsupported", 1),
 		strings.Replace(applicationYAML, "agents: {}", "agents: {}\n  type: assistant", 1),
 		strings.Replace(applicationYAML, "agents: {}", "agents: {}\n  archived: true", 1),
 		strings.Replace(applicationYAML, "spec:", "archived: 1\nspec:", 1),
-		strings.Replace(applicationYAML, "name: product", "name: Product", 1),
-		strings.Replace(applicationYAML, "display_name: Product assistant", "display_name: ' '", 1),
+		strings.Replace(applicationYAML, "slug: product", "slug: Product", 1),
+		strings.Replace(applicationYAML, "slug: product", "name: product", 1),
+		strings.Replace(applicationYAML, "name: Product assistant", "display_name: Product assistant", 1),
+		strings.Replace(applicationYAML, "name: Product assistant", "name: ' '", 1),
 	} {
 		writeFiles(t, root, map[string]string{"applications/renamed.yaml": raw})
 		if _, err := load(root, nil, false); err == nil {
@@ -558,7 +560,7 @@ func TestApplicationLocalKeysRoundTripCanonically(t *testing.T) {
 		t.Fatal(err)
 	}
 	main := wire(obj(obj(obj(g.Applications[0]["spec"])["agents"])["main"]))
-	if main != `{"agent":{"name":"main_assistant"},"memory":"read_write","storages":[{"name":"document_templates"},{"name":"product_documentation"}]}` {
+	if main != `{"agent":{"slug":"main_assistant"},"memory":"read_write","storages":[{"slug":"document_templates"},{"slug":"product_documentation"}]}` {
 		t.Fatal("inheriting local Agent gained models/default or lost name-only refs", main)
 	}
 	files, err := render(g, nil)
@@ -627,8 +629,8 @@ func TestPreviousAgentAndApplicationFormatsFailClearly(t *testing.T) {
 		want  string
 	}{
 		{map[string]string{"applications/product.yaml": strings.Replace(applicationYAML, "agents: {}", "agents: [{name: main}]", 1)}, "Application Agent reference arrays are unsupported"},
-		{map[string]string{"agents/support/agent.yaml": "version: 1\nkind: agent\nname: support\nspec:\n  display_name: Support\n  models: [smart]\n  tools: []\n", "agents/support/instruction.md": "Help\n"}, "spec.models is unsupported"},
-		{map[string]string{"agents/support/agent.yaml": "version: 1\nkind: agent\nname: support\nspec:\n  display_name: Support\n  tools: []\n", "agents/support/instruction.md": "Help\n", "agents/support/policies/member.yaml": "version: 1\nkind: policy\nname: member\nspec: {}\n"}, "agents/support/policies: Agent Policies are unsupported"},
+		{map[string]string{"agents/support/agent.yaml": "version: 1\nkind: agent\nslug: support\nspec:\n  name: Support\n  models: [smart]\n  tools: []\n", "agents/support/instruction.md": "Help\n"}, "spec.models is unsupported"},
+		{map[string]string{"agents/support/agent.yaml": "version: 1\nkind: agent\nslug: support\nspec:\n  name: Support\n  tools: []\n", "agents/support/instruction.md": "Help\n", "agents/support/policies/member.yaml": "version: 1\nkind: policy\nname: member\nspec: {}\n"}, "agents/support/policies: Agent Policies are unsupported"},
 	} {
 		root := t.TempDir()
 		writeFiles(t, root, tc.files)
@@ -696,7 +698,7 @@ func TestApplicationToolEndpointRoundTripsWithoutEnvURL(t *testing.T) {
 
 func TestServerToolContractHasNoDestinationOrCredential(t *testing.T) {
 	contract := "version: 1\nkind: tool_contract\nname: v1\nspec:\n  description: Lookup\n  type: server_webhook\n  input_schema:\n    type: object\n    additionalProperties: false\n  output_schema: {}\n"
-	files := map[string]string{"tools/lookup/tool.yaml": "version: 1\nkind: tool\nname: lookup\nspec:\n  display_name: Lookup\n  current_contract: v1\n"}
+	files := map[string]string{"tools/lookup/tool.yaml": "version: 1\nkind: tool\nslug: lookup\nspec:\n  name: Lookup\n  current_contract: v1\n"}
 	root := t.TempDir()
 	for webhook, want := range map[string]string{
 		"": `{"timeout_seconds":10}`,
@@ -727,6 +729,34 @@ func TestServerToolContractHasNoDestinationOrCredential(t *testing.T) {
 		writeFiles(t, root, files)
 		if _, err := load(root, nil, false); err == nil {
 			t.Errorf("old or invalid webhook field accepted: %s", webhook)
+		}
+	}
+}
+
+func TestAgentToolReferencesRoundTripWithSlugs(t *testing.T) {
+	const agent = "version: 1\nkind: agent\nslug: support\nspec:\n  name: Support Assistant\n  tools:\n    - lookup\n    - slug: documents\n      contract: v1\n"
+	const path = "agents/support/agent.yaml"
+	root := t.TempDir()
+	writeFiles(t, root, map[string]string{path: agent, "agents/support/instruction.md": "Help\n"})
+	g, err := load(root, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"archived":false,"slug":"support","spec":{"instruction":"Help\n","name":"Support Assistant","tools":[{"slug":"lookup"},{"contract":"v1","slug":"documents"}]}}`; len(g.Agents) != 1 || wire(g.Agents[0]) != want {
+		t.Fatal("unexpected Agent wire shape", wire(g.Agents))
+	}
+	files, err := render(g, nil)
+	if err != nil || files[path] != agent {
+		t.Fatal("Agent YAML changed shape", err, files[path])
+	}
+	for _, field := range []struct{ from, to string }{
+		{"slug: support", "name: support"},
+		{"name: Support Assistant", "display_name: Support Assistant"},
+		{"slug: documents", "name: documents"},
+	} {
+		writeFiles(t, root, map[string]string{path: strings.Replace(agent, field.from, field.to, 1)})
+		if _, err := load(root, nil, false); err == nil {
+			t.Errorf("accepted retired field %q", field.to)
 		}
 	}
 }

@@ -89,13 +89,7 @@ func (r *runner) selectItem(items []any, message string, o Options, single bool)
 	}
 	for i, v := range items {
 		m := obj(v)
-		label := m["display_name"]
-		if label == nil {
-			label = m["name"]
-		}
-		if label == nil {
-			label = m["id"]
-		}
+		label := m["name"]
 		fmt.Fprintf(r.errOut, "%d. %s (%s)\n", i+1, wire(label), wire(m["id"]))
 	}
 	s, e := r.ask(message+" (empty cancels):", o)
@@ -117,11 +111,11 @@ func (r *runner) selectItem(items []any, message string, o Options, single bool)
 	return obj(items[i-1]), nil
 }
 
-// Export uses only primary names. Validate its staged graph before local publication.
+// Export uses only primary slugs. Validate its staged graph before local publication.
 func validateExportGraph(desired graph) error {
-	included := func(kind, name string) object {
+	included := func(kind, slug string) object {
 		for _, r := range desired.group(kind) {
-			if r["name"] == name {
+			if r["slug"] == slug {
 				return r
 			}
 		}
@@ -130,34 +124,34 @@ func validateExportGraph(desired graph) error {
 	for _, kind := range []string{"model", "tool", "agent", "application"} {
 		seen := map[string]bool{}
 		for _, r := range desired.group(kind) {
-			id := str(r["name"])
-			if seen[id] {
+			slug := str(r["slug"])
+			if seen[slug] {
 				return commandError("duplicate_identity", "Several definitions resolve to one resource", 1)
 			}
-			seen[id] = true
+			seen[slug] = true
 		}
 	}
 	for _, a := range desired.Applications {
 		s := obj(a["spec"])
-		usable := func(kind, name string) (object, error) {
-			r := included(kind, name)
-			label := strings.ToUpper(kind[:1]) + kind[1:] + " " + name
+		usable := func(kind, slug string) (object, error) {
+			r := included(kind, slug)
+			label := strings.ToUpper(kind[:1]) + kind[1:] + " " + slug
 			if r == nil {
-				return nil, commandError("incomplete_graph", "Application "+str(a["name"])+": "+label+" missing locally", 1)
+				return nil, commandError("incomplete_graph", "Application "+str(a["slug"])+": "+label+" missing locally", 1)
 			}
 			if a["archived"] != true && r["archived"] == true {
-				return nil, commandError("invalid_lifecycle", "Application "+str(a["name"])+": active Application requires active "+label, 1)
+				return nil, commandError("invalid_lifecycle", "Application "+str(a["slug"])+": active Application requires active "+label, 1)
 			}
 			return r, nil
 		}
 		for _, k := range slices.Sorted(maps.Keys(obj(s["models"]))) {
-			if _, e := usable("model", str(obj(obj(obj(s["models"])[k])["model"])["name"])); e != nil {
+			if _, e := usable("model", str(obj(obj(obj(s["models"])[k])["model"])["slug"])); e != nil {
 				return e
 			}
 		}
 		agents := map[string]object{}
 		for _, k := range slices.Sorted(maps.Keys(obj(s["agents"]))) {
-			agent, e := usable("agent", str(obj(obj(obj(s["agents"])[k])["agent"])["name"]))
+			agent, e := usable("agent", str(obj(obj(obj(s["agents"])[k])["agent"])["slug"]))
 			if e != nil {
 				return e
 			}
@@ -167,8 +161,8 @@ func validateExportGraph(desired graph) error {
 			rules := obj(obj(obj(s["plans"])[p])["agents"])
 			for _, k := range slices.Sorted(maps.Keys(rules)) {
 				for _, t := range objects(obj(obj(rules[k])["tools"])["allowed"]) {
-					if !slices.ContainsFunc(objects(obj(agents[k]["spec"])["tools"]), func(r object) bool { return r["name"] == t["name"] }) {
-						return commandError("incomplete_graph", "Application "+str(a["name"])+": Plan "+p+" Tool "+str(t["name"])+" is not a Tool of local Agent "+k, 1)
+					if !slices.ContainsFunc(objects(obj(agents[k]["spec"])["tools"]), func(r object) bool { return r["slug"] == t["slug"] }) {
+						return commandError("incomplete_graph", "Application "+str(a["slug"])+": Plan "+p+" Tool "+str(t["slug"])+" is not a Tool of local Agent "+k, 1)
 					}
 				}
 			}
@@ -177,9 +171,9 @@ func validateExportGraph(desired graph) error {
 	for _, a := range desired.Agents {
 		s := obj(a["spec"])
 		for _, r := range objects(s["tools"]) {
-			t := included("tool", str(r["name"]))
+			t := included("tool", str(r["slug"]))
 			if t == nil {
-				return commandError("incomplete_graph", "Agent "+str(a["name"])+": Tool/Contract missing locally", 1)
+				return commandError("incomplete_graph", "Agent "+str(a["slug"])+": Tool/Contract missing locally", 1)
 			}
 			if r["contract"] != nil {
 				found := false
@@ -187,7 +181,7 @@ func validateExportGraph(desired graph) error {
 					found = found || c["name"] == r["contract"]
 				}
 				if !found {
-					return commandError("incomplete_graph", "Agent "+str(a["name"])+": Tool/Contract missing locally", 1)
+					return commandError("incomplete_graph", "Agent "+str(a["slug"])+": Tool/Contract missing locally", 1)
 				}
 			}
 		}
@@ -200,7 +194,7 @@ func pullLocators(g graph, locs map[string]string, bindings []object) (map[strin
 	}
 	seen := map[string]bool{}
 	for _, b := range bindings {
-		k := str(b["kind"]) + "/" + str(b["name"])
+		k := str(b["kind"]) + "/" + str(b["slug"])
 		if seen[k] {
 			return bad()
 		}
@@ -215,7 +209,7 @@ func pullLocators(g graph, locs map[string]string, bindings []object) (map[strin
 		kind, alias, target, purpose := parts[0], parts[1], parts[2], parts[3]
 		id := ""
 		for _, b := range bindings {
-			if b["kind"] == kind && b["name"] == alias {
+			if b["kind"] == kind && b["slug"] == alias {
 				id = str(b["id"])
 				break
 			}
@@ -226,8 +220,8 @@ func pullLocators(g graph, locs map[string]string, bindings []object) (map[strin
 		parents := []string{}
 		for _, r := range g.group(kind) {
 			for _, b := range bindings {
-				if b["kind"] == kind && b["name"] == r["name"] && b["id"] == id {
-					parents = append(parents, str(r["name"]))
+				if b["kind"] == kind && b["slug"] == r["slug"] && b["id"] == id {
+					parents = append(parents, str(r["slug"]))
 				}
 			}
 		}
@@ -557,6 +551,9 @@ func (r *runner) run(o Options) (Result, error) {
 			if len(local.Managed) > 0 && !o.Force {
 				return nil, nil, commandError("force_required", "Existing managed files require --force", 1)
 			}
+			if local.legacyPath != "" {
+				return nil, nil, &FileError{Diagnostic{"schema", local.legacyPath, "Legacy Stack YAML; manually rename root name to slug and spec.display_name to spec.name where present, keep from_env unchanged, then retry pull"}}
+			}
 			if len(local.Locators) > 0 {
 				baseline, e = client.request(r.ctx, "GET", path+"/bindings", "", "")
 				if e != nil {
@@ -619,7 +616,7 @@ func (r *runner) run(o Options) (Result, error) {
 		return bad("command_invalid", "Unsupported command")
 	}
 	if o.Output == "text" {
-		fmt.Fprintf(r.errOut, "API: %s\nProject: %s (%s)\nWhole Project; prune=%t. Partial nonempty roots can remove remote resources.\n%s", textValue(api), textValue(str(project["id"])), textValue(str(project["display_name"])), o.Prune, semantic(plan))
+		fmt.Fprintf(r.errOut, "API: %s\nProject: %s (%s)\nWhole Project; prune=%t. Partial nonempty roots can remove remote resources.\n%s", textValue(api), textValue(str(project["id"])), textValue(str(project["name"])), o.Prune, semantic(plan))
 	}
 	if len(list(plan["changes"])) > 0 {
 		if e = r.confirm("Apply this complete Project plan?", o, o.Approve); e != nil {

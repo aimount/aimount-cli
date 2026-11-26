@@ -330,10 +330,10 @@ func (c *Client) request(ctx context.Context, method, path, body, key string) (o
 		out := []any{}
 		for _, v := range bs {
 			b := obj(v)
-			if !slices.Contains([]string{"model", "tool", "agent", "application"}, str(b["kind"])) || !nameRE.MatchString(str(b["name"])) || str(b["id"]) == "" {
+			if !slices.Contains([]string{"model", "tool", "agent", "application"}, str(b["kind"])) || !nameRE.MatchString(str(b["slug"])) || str(b["id"]) == "" {
 				return bad(s, "invalid_response")
 			}
-			out = append(out, fields(b, "kind", "name", "id"))
+			out = append(out, fields(b, "kind", "slug", "id"))
 		}
 		return object{"version": 1, "bindings": out}, nil
 	}
@@ -349,10 +349,10 @@ func (c *Client) request(ctx context.Context, method, path, body, key string) (o
 		out := []any{}
 		for _, v := range changes {
 			r := obj(v)
-			if r == nil || !slices.Contains([]string{"model", "tool", "agent", "application"}, str(r["kind"])) || str(r["name"]) == "" || str(r["operation"]) == "" {
+			if r == nil || !slices.Contains([]string{"model", "tool", "agent", "application"}, str(r["kind"])) || !nameRE.MatchString(str(r["slug"])) || str(r["operation"]) == "" {
 				return bad(s, "invalid_response")
 			}
-			projected := fields(r, "kind", "name", "id", "operation", "archived", "runtime_cascade")
+			projected := fields(r, "kind", "slug", "id", "operation", "archived", "runtime_cascade")
 			if v, ok := r["erasure_scope"]; ok {
 				scope, ok := v.([]any)
 				if !ok {
@@ -403,7 +403,7 @@ func (c *Client) request(ctx context.Context, method, path, body, key string) (o
 		if e := validateDiscoveryResource(m, "prj"); e != nil {
 			return bad(s, "invalid_response")
 		}
-		return fields(m, "id", "organization_id", "display_name", "created_at", "updated_at", "version", "status", "deleted_at", "restore_until"), nil
+		return fields(m, "id", "organization_id", "slug", "name", "created_at", "updated_at", "version", "status", "deleted_at", "restore_until"), nil
 	}
 	if method == "GET" && (path == "/v0/organizations" || strings.HasPrefix(path, "/v0/organizations?cursor=") || strings.HasPrefix(path, "/v0/organizations/")) {
 		if strings.Contains(strings.Split(path, "?")[0], "/projects") || path == "/v0/organizations" || strings.HasPrefix(path, "/v0/organizations?cursor=") {
@@ -421,7 +421,7 @@ func (c *Client) request(ctx context.Context, method, path, body, key string) (o
 				if e := validateDiscoveryResource(r, prefix); e != nil {
 					return bad(s, "invalid_response")
 				}
-				out = append(out, fields(r, "id", "name", "organization_id", "display_name", "created_at", "updated_at", "version", "status", "deleted_at", "restore_until", "role"))
+				out = append(out, fields(r, "id", "slug", "organization_id", "name", "created_at", "updated_at", "version", "status", "deleted_at", "restore_until", "role"))
 			}
 			projected := object{"items": out}
 			if cursor, ok := m["next_cursor"]; ok {
@@ -437,7 +437,7 @@ func (c *Client) request(ctx context.Context, method, path, body, key string) (o
 		if e := validateDiscoveryResource(m, "org"); e != nil || str(m["id"]) != strings.TrimPrefix(path, "/v0/organizations/") {
 			return bad(s, "invalid_response")
 		}
-		return fields(m, "id", "name", "display_name", "created_at", "updated_at", "version", "role"), nil
+		return fields(m, "id", "slug", "name", "created_at", "updated_at", "version", "role"), nil
 	}
 	return m, nil
 }
@@ -462,13 +462,13 @@ func (c *Client) stack(ctx context.Context, projectID string) (graph, error) {
 		seen := map[string]bool{}
 		for _, v := range a {
 			r := obj(v)
-			if r == nil || !nameRE.MatchString(str(r["name"])) || obj(r["spec"]) == nil {
+			if r == nil || !nameRE.MatchString(str(r["slug"])) || obj(r["spec"]) == nil {
 				return g, &APIError{Status: 200, Code: "invalid_response"}
 			}
-			if kind == "application" && seen[str(r["name"])] {
+			if kind == "application" && seen[str(r["slug"])] {
 				return g, &APIError{Status: 200, Code: "invalid_response"}
 			}
-			seen[str(r["name"])] = true
+			seen[str(r["slug"])] = true
 			if v, ok := r["archived"]; ok {
 				if _, ok := v.(bool); !ok {
 					return g, &APIError{Status: 200, Code: "invalid_response"}
@@ -478,7 +478,7 @@ func (c *Client) stack(ctx context.Context, projectID string) (graph, error) {
 			if spec == nil {
 				return g, &APIError{Status: 200, Code: "invalid_response"}
 			}
-			p := fields(r, "name", "archived")
+			p := fields(r, "slug", "archived")
 			p["spec"] = spec
 			out = append(out, p)
 		}
@@ -546,18 +546,18 @@ func projectReadSet(m object) (object, error) {
 				}
 				safe = append(safe, fields(r, "kind", "id", "etag"))
 			case "bindings":
-				if !nameRE.MatchString(str(r["name"])) {
+				if !nameRE.MatchString(str(r["slug"])) {
 					return bad()
 				}
-				safe = append(safe, fields(r, "kind", "name", "id"))
+				safe = append(safe, fields(r, "kind", "slug", "id"))
 			case "credentials":
-				if kind != "model" || !nameRE.MatchString(str(r["name"])) || !nameRE.MatchString(str(r["target"])) {
+				if kind != "model" || !nameRE.MatchString(str(r["slug"])) || !nameRE.MatchString(str(r["target"])) {
 					return bad()
 				}
 				if _, ok := exactInt(r["version"], math.MaxInt64, 0); !ok {
 					return bad()
 				}
-				safe = append(safe, fields(r, "kind", "id", "name", "target", "version"))
+				safe = append(safe, fields(r, "kind", "id", "slug", "target", "version"))
 			}
 		}
 		out[field] = safe
@@ -565,10 +565,10 @@ func projectReadSet(m object) (object, error) {
 	return out, nil
 }
 func validateDiscoveryResource(m object, prefix string) error {
-	if m == nil || !idValid(str(m["id"]), prefix) {
+	if m == nil || !idValid(str(m["id"]), prefix) || !nameRE.MatchString(str(m["slug"])) || strings.TrimSpace(str(m["name"])) == "" {
 		return errors.New("invalid_response")
 	}
-	for _, k := range []string{"name", "organization_id", "display_name", "created_at", "updated_at", "status", "deleted_at", "restore_until", "role"} {
+	for _, k := range []string{"organization_id", "created_at", "updated_at", "status", "deleted_at", "restore_until", "role"} {
 		if v, ok := m[k]; ok && v != nil {
 			if _, ok := v.(string); !ok {
 				return errors.New("invalid_response")

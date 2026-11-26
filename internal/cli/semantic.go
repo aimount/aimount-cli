@@ -23,9 +23,9 @@ func differences(before, after any, path string) []string {
 				}
 				r := obj(v)
 				if r["contract"] != nil {
-					return str(r["name"]) + "@" + str(r["contract"])
+					return str(r["slug"]) + "@" + str(r["contract"])
 				}
-				return str(r["name"])
+				return str(r["slug"])
 			}
 			left, right := []string{}, []string{}
 			for _, v := range a {
@@ -100,8 +100,8 @@ func semantic(plan object) string {
 		if rank[str(a["kind"])] != rank[str(b["kind"])] {
 			return rank[str(a["kind"])] < rank[str(b["kind"])]
 		}
-		if a["name"] != b["name"] {
-			return str(a["name"]) < str(b["name"])
+		if a["slug"] != b["slug"] {
+			return str(a["slug"]) < str(b["slug"])
 		}
 		return str(a["operation"]) < str(b["operation"])
 	})
@@ -114,7 +114,7 @@ func semantic(plan object) string {
 			}
 		}
 		for _, c := range changes {
-			line := literal(c["operation"]) + " " + literal(c["kind"]) + " " + literal(c["name"])
+			line := literal(c["operation"]) + " " + literal(c["kind"]) + " " + literal(c["slug"])
 			if c["operation"] == "DELETE" {
 				switch c["kind"] {
 				case "application":
@@ -182,8 +182,8 @@ func semantic(plan object) string {
 		}
 		sort.Slice(members, func(i, j int) bool {
 			a, b := members[i], members[j]
-			if a.c["name"] != b.c["name"] {
-				return str(a.c["name"]) < str(b.c["name"])
+			if a.c["slug"] != b.c["slug"] {
+				return str(a.c["slug"]) < str(b.c["slug"])
 			}
 			if a.name != b.name {
 				return a.name < b.name
@@ -211,7 +211,7 @@ func semantic(plan object) string {
 			} else if right == nil {
 				op = "REMOVE"
 			}
-			lines = append(lines, group.label+" "+literal(m.c["name"])+"/"+literal(m.name)+" "+op)
+			lines = append(lines, group.label+" "+literal(m.c["slug"])+"/"+literal(m.name)+" "+op)
 			for _, line := range differences(left, right, group.field+"."+m.name) {
 				lines = append(lines, "  "+line)
 			}
@@ -226,12 +226,12 @@ func semantic(plan object) string {
 	}
 	sort.Slice(reviews, func(i, j int) bool {
 		a, b := reviews[i], reviews[j]
-		ka := str(a.c["kind"]) + "/" + str(a.c["name"]) + "/" + str(a.r["target"]) + "/" + str(a.r["action"])
-		kb := str(b.c["kind"]) + "/" + str(b.c["name"]) + "/" + str(b.r["target"]) + "/" + str(b.r["action"])
+		ka := str(a.c["kind"]) + "/" + str(a.c["slug"]) + "/" + str(a.r["target"]) + "/" + str(a.r["action"])
+		kb := str(b.c["kind"]) + "/" + str(b.c["slug"]) + "/" + str(b.r["target"]) + "/" + str(b.r["action"])
 		return ka < kb
 	})
 	for _, v := range reviews {
-		lines = append(lines, "credential "+literal(v.r["action"])+" "+literal(v.c["kind"])+" "+literal(v.c["name"])+"/"+literal(v.r["target"])+" (expected version "+literal(v.r["expected_version"])+")")
+		lines = append(lines, "credential "+literal(v.r["action"])+" "+literal(v.c["kind"])+" "+literal(v.c["slug"])+"/"+literal(v.r["target"])+" (expected version "+literal(v.r["expected_version"])+")")
 	}
 	return strings.Join(lines, "\n") + "\n"
 }
