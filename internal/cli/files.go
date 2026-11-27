@@ -738,6 +738,20 @@ type pendingSecret struct {
 	url             object
 }
 
+var portableNodeFields = strings.Fields("name display_name enabled route_weight provider model api base_url thinking output_token_parameter credentials")
+
+// These optional settings are only defined for compatible Chat Completions.
+func invalidNodeOption(n object) string {
+	compatibleChat := n["provider"] == "openai_compatible" && n["api"] == "chat_completions"
+	if v, ok := n["thinking"]; ok && (!compatibleChat || v != "disabled") {
+		return "thinking"
+	}
+	if v, ok := n["output_token_parameter"]; ok && (!compatibleChat || v != "max_tokens") {
+		return "output_token_parameter"
+	}
+	return ""
+}
+
 func load(root string, env map[string]string, pull bool) (g graph, err error) {
 	g = emptyGraph()
 	actual, e := filepath.EvalSymlinks(root)
@@ -810,7 +824,7 @@ func load(root string, env map[string]string, pull bool) (g graph, err error) {
 				nodes := []any{}
 				enabled := false
 				for _, v := range collection(s["nodes"], path, 1) {
-					n := strictObject(v, strings.Fields("name display_name enabled route_weight provider model api base_url credentials"), strings.Fields("name display_name provider model credentials"), path)
+					n := strictObject(v, portableNodeFields, strings.Fields("name display_name provider model credentials"), path)
 					technical(n["name"], path, false)
 					display(n, "display_name", path)
 					text(n["model"], 256, path, true)
@@ -854,6 +868,9 @@ func load(root string, env map[string]string, pull bool) (g graph, err error) {
 						endpoint(n["base_url"], path)
 					default:
 						fail(path, "unsupported provider")
+					}
+					if field := invalidNodeOption(n); field != "" {
+						fail(path, "invalid Node "+field)
 					}
 					nodes = append(nodes, out)
 				}
@@ -1092,7 +1109,7 @@ func orderedKeys(m object) []string {
 	case m["capabilities"] != nil:
 		order = strings.Fields("name description limits capabilities nodes")
 	case m["provider"] != nil:
-		order = strings.Fields("name display_name enabled route_weight provider model api base_url credentials")
+		order = portableNodeFields
 	case m["context_window_tokens"] != nil:
 		order = strings.Fields("context_window_tokens max_output_tokens")
 	case m["input_modalities"] != nil:
@@ -1172,7 +1189,7 @@ func render(g graph, locs map[string]string) (files map[string]string, err error
 			out["capabilities"] = fields(obj(s["capabilities"]), "input_modalities", "output_modalities", "tool_calling")
 			nodes := []any{}
 			for _, n := range objects(s["nodes"]) {
-				v := fields(n, "name", "display_name", "enabled", "route_weight", "provider", "model", "api", "base_url")
+				v := fields(n, portableNodeFields...)
 				if obj(n["credentials"])["mode"] == "api_key" {
 					v["credentials"] = object{"api_key": object{"from_env": locator("model", slug, str(n["name"]), "key", locs)}}
 				} else {
@@ -1551,7 +1568,10 @@ func readRemoteSpec(kind string, s object, partial bool) object {
 					}
 				}
 			}
-			p := fields(m, "name", "display_name", "enabled", "route_weight", "provider", "model", "api", "base_url")
+			if invalidNodeOption(m) != "" {
+				return nil
+			}
+			p := fields(m, portableNodeFields...)
 			p["credentials"] = fields(obj(m["credentials"]), "mode")
 			return p
 		}) {

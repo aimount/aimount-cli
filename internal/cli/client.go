@@ -323,19 +323,11 @@ func (c *Client) request(ctx context.Context, method, path, body, key string) (o
 		return object{"principal": fields(p, "type", "user_id", "display_name"), "authentication": fields(a, "method", "expires_at", "pat_id")}, nil
 	}
 	if method == "GET" && strings.HasSuffix(path, "/stack/bindings") {
-		bs, ok := m["bindings"].([]any)
-		if !numberIs(m["version"], 1) || !ok {
+		bindings := projectBindings(m["bindings"], false)
+		if !numberIs(m["version"], 1) || bindings == nil {
 			return bad(s, "invalid_response")
 		}
-		out := []any{}
-		for _, v := range bs {
-			b := obj(v)
-			if !slices.Contains([]string{"model", "tool", "agent", "application"}, str(b["kind"])) || !nameRE.MatchString(str(b["slug"])) || str(b["id"]) == "" {
-				return bad(s, "invalid_response")
-			}
-			out = append(out, fields(b, "kind", "slug", "id"))
-		}
-		return object{"version": 1, "bindings": out}, nil
+		return object{"version": 1, "bindings": bindings}, nil
 	}
 	if method == "POST" && strings.HasSuffix(path, "/stack/plan") {
 		changes, ok := m["changes"].([]any)
@@ -496,6 +488,31 @@ func (c *Client) stack(ctx context.Context, projectID string) (graph, error) {
 	return g, nil
 }
 
+var stackResourcePrefixes = map[string]string{"model": "mdl", "tool": "tol", "agent": "agt", "application": "app"}
+
+func projectBindings(value any, readSet bool) []any {
+	bindings, ok := value.([]any)
+	if !ok || (readSet && len(bindings) > 100000) {
+		return nil
+	}
+	out := []any{}
+	for _, v := range bindings {
+		b := obj(v)
+		kind, id := str(b["kind"]), str(b["id"])
+		prefix := stackResourcePrefixes[kind]
+		if kind == "storage" {
+			prefix = "sto"
+		}
+		// The locator lookup historically accepts opaque IDs for managed kinds.
+		if prefix == "" || id == "" || !nameRE.MatchString(str(b["slug"])) ||
+			((readSet || kind == "storage") && !idValid(id, prefix)) {
+			return nil
+		}
+		out = append(out, fields(b, "kind", "slug", "id"))
+	}
+	return out
+}
+
 func projectReadSet(m object) (object, error) {
 	bad := func() (object, error) { return nil, errors.New("invalid read-set response") }
 	if m == nil {
@@ -517,8 +534,12 @@ func projectReadSet(m object) (object, error) {
 		}
 		out[field] = m[field]
 	}
-	prefixes := map[string]string{"model": "mdl", "tool": "tol", "agent": "agt", "application": "app"}
-	for _, field := range []string{"resources", "bindings", "credentials"} {
+	bindings := projectBindings(m["bindings"], true)
+	if bindings == nil {
+		return bad()
+	}
+	out["bindings"] = bindings
+	for _, field := range []string{"resources", "credentials"} {
 		a, ok := m[field].([]any)
 		if !ok || len(a) > 100000 {
 			return bad()
@@ -530,7 +551,7 @@ func projectReadSet(m object) (object, error) {
 				return bad()
 			}
 			kind := str(r["kind"])
-			prefix, ok := prefixes[kind]
+			prefix, ok := stackResourcePrefixes[kind]
 			if !ok {
 				return bad()
 			}
@@ -545,11 +566,6 @@ func projectReadSet(m object) (object, error) {
 					return bad()
 				}
 				safe = append(safe, fields(r, "kind", "id", "etag"))
-			case "bindings":
-				if !nameRE.MatchString(str(r["slug"])) {
-					return bad()
-				}
-				safe = append(safe, fields(r, "kind", "slug", "id"))
 			case "credentials":
 				if kind != "model" || !nameRE.MatchString(str(r["slug"])) || !nameRE.MatchString(str(r["target"])) {
 					return bad()
