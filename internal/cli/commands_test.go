@@ -150,7 +150,11 @@ func TestPullLocatorAliasIdentityAndAmbiguity(t *testing.T) {
 		t.Fatal(out, e)
 	}
 	if _, e = pullLocators(g, locs, append(bindings, bindings[0])); e == nil {
-		t.Fatal("ambiguous mapping accepted")
+		t.Fatal("duplicate binding accepted")
+	}
+	g.Models = append(g.Models, object{"slug": "other"})
+	if _, e = pullLocators(g, locs, append(bindings, object{"kind": "model", "slug": "other", "id": "mdl_0000000000000001"})); e == nil {
+		t.Fatal("multiple exported parents accepted")
 	}
 	if locator("model", "a_b", "c", "key", nil) == locator("model", "a", "b_c", "key", nil) {
 		t.Fatal("generated locator collision")

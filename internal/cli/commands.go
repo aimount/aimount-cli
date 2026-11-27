@@ -192,13 +192,13 @@ func pullLocators(g graph, locs map[string]string, bindings []object) (map[strin
 	bad := func() (map[string]string, error) {
 		return nil, commandError("stack_binding_conflict", "Uncertain or changed locator parent correspondence; retry explicitly", 2)
 	}
-	seen := map[string]bool{}
+	ids := make(map[[2]string]string, len(bindings))
 	for _, b := range bindings {
-		k := str(b["kind"]) + "/" + str(b["slug"])
-		if seen[k] {
+		k := [2]string{str(b["kind"]), str(b["slug"])}
+		if _, exists := ids[k]; exists {
 			return bad()
 		}
-		seen[k] = true
+		ids[k] = str(b["id"])
 	}
 	out := map[string]string{}
 	for key, v := range locs {
@@ -207,28 +207,25 @@ func pullLocators(g graph, locs map[string]string, bindings []object) (map[strin
 			return bad()
 		}
 		kind, alias, target, purpose := parts[0], parts[1], parts[2], parts[3]
-		id := ""
-		for _, b := range bindings {
-			if b["kind"] == kind && b["slug"] == alias {
-				id = str(b["id"])
-				break
-			}
-		}
+		id := ids[[2]string{kind, alias}]
 		if id == "" {
 			continue
 		}
-		parents := []string{}
+		parent := ""
 		for _, r := range g.group(kind) {
-			for _, b := range bindings {
-				if b["kind"] == kind && b["slug"] == r["slug"] && b["id"] == id {
-					parents = append(parents, str(r["slug"]))
-				}
+			slug := str(r["slug"])
+			if ids[[2]string{kind, slug}] != id {
+				continue
 			}
+			if parent != "" {
+				return bad()
+			}
+			parent = slug
 		}
-		if len(parents) != 1 {
+		if parent == "" {
 			return bad()
 		}
-		k := kind + "/" + parents[0] + "/" + target + "/" + purpose
+		k := kind + "/" + parent + "/" + target + "/" + purpose
 		if prior, ok := out[k]; ok && prior != v {
 			return bad()
 		}
