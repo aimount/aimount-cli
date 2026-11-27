@@ -415,16 +415,11 @@ func (c *Client) request(ctx context.Context, method, path, body, key string) (o
 				}
 				out = append(out, fields(r, "id", "slug", "organization_id", "name", "created_at", "updated_at", "version", "status", "deleted_at", "restore_until", "role"))
 			}
-			projected := object{"items": out}
-			if cursor, ok := m["next_cursor"]; ok {
-				if cursor != nil {
-					if _, ok := cursor.(string); !ok {
-						return bad(s, "invalid_response")
-					}
-				}
-				projected["next_cursor"] = cursor
+			cursor, present := m["next_cursor"]
+			if text, ok := cursor.(string); !present || (cursor != nil && (!ok || text == "")) {
+				return bad(s, "invalid_response")
 			}
-			return projected, nil
+			return object{"items": out, "next_cursor": cursor}, nil
 		}
 		if e := validateDiscoveryResource(m, "org"); e != nil || str(m["id"]) != strings.TrimPrefix(path, "/v0/organizations/") {
 			return bad(s, "invalid_response")
@@ -617,7 +612,7 @@ func (c *Client) pages(ctx context.Context, path string) ([]any, error) {
 		if len(items) > 100000 {
 			return nil, &APIError{Status: 200, Code: "invalid_response"}
 		}
-		if p["next_cursor"] == nil || p["next_cursor"] == "" {
+		if p["next_cursor"] == nil {
 			return items, nil
 		}
 		cursor, ok := p["next_cursor"].(string)

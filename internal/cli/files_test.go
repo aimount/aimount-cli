@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -129,9 +130,12 @@ func TestDiscoveryAggregatesAndPreservesOrphans(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "a.yaml") || !strings.Contains(err.Error(), "b.yaml") {
 		t.Fatal(err)
 	}
-	i, err := inspect(root)
-	if err != nil || len(i.Managed) != 3 {
-		t.Fatal(i, err)
+	want := []string{"agents/orphan/instruction.md", "models/a.yaml", "models/b.yaml"}
+	if got := discover(root).Managed; !slices.Equal(got, want) {
+		t.Fatalf("managed files: got %v, want %v", got, want)
+	}
+	if _, err := inspect(root); err == nil || !strings.Contains(err.Error(), "models/a.yaml: expected mapping") {
+		t.Fatalf("inspect must reject the malformed model: %v", err)
 	}
 }
 
