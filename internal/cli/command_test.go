@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -39,6 +40,10 @@ func TestOfflineCommandHelp(t *testing.T) {
 		{[]string{"help", "auth"}, "login"},
 		{[]string{"apply", "--help"}, "--auto-approve"},
 		{[]string{"completion", "--help"}, "zsh"},
+		{[]string{"resolve"}, "application"},
+		{[]string{"resolve", "application", "--help"}, "application <slug>"},
+		{[]string{"status", "--help"}, "--stack"},
+		{[]string{"apply", "--help"}, "--require-empty"},
 	} {
 		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
 			var out, stderr bytes.Buffer
@@ -60,6 +65,7 @@ func TestHelpAndParseErrorsUseOneJSONEnvelope(t *testing.T) {
 		{[]string{"plan", "--unsupported", "--output", "json"}, false},
 		{[]string{"--https://synthetic-private@example.test", "--output=json"}, false},
 		{[]string{"auth", "synthetic-private", "--output", "json"}, false},
+		{[]string{"resolve", "application", "synthetic-private", "--output", "json"}, false},
 	} {
 		var out, stderr bytes.Buffer
 		exit := Main(context.Background(), tc.args, nil, os.Stdin, &out, &stderr)
@@ -90,6 +96,11 @@ func TestCobraFlagCompatibility(t *testing.T) {
 		{"apply", "--force"},
 		{"auth", "status", "extra"},
 		{"plan", "--root", "--project"},
+		{"plan", "--require-empty"},
+		{"apply", "--require-empty", "--prune"},
+		{"apply", "--stack"},
+		{"resolve", "application"},
+		{"resolve", "application", "first", "second"},
 	} {
 		if _, err := parseOptions(args, nil, false); err == nil {
 			t.Errorf("accepted %v", args)
@@ -175,6 +186,156 @@ func TestCompletionProtocolKeepsDirectiveLast(t *testing.T) {
 	exit := Main(context.Background(), []string{"__complete", "auth", ""}, nil, os.Stdin, &out, &stderr)
 	if exit != 0 || stderr.Len() != 0 || !strings.Contains(out.String(), "login\t") || !strings.HasSuffix(out.String(), ":4\n") {
 		t.Fatalf("exit=%d stdout=%s stderr=%s", exit, &out, &stderr)
+	}
+}
+
+func TestResolveApplicationOutput(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	const projectID = "prj_0123456789ABCDEF"
+	const appID = "app_0123456789ABCDEF"
+	const otherID = "app_0000000000000001"
+	const goodBindings = `{"version":1,"bindings":[{"kind":"model","slug":"product","id":"mdl_0123456789ABCDEF"},{"kind":"application","slug":"other","id":"` + otherID + `"},{"kind":"application","slug":"product","id":"` + appID + `"},{"kind":"application","slug":"old_product","id":"` + appID + `","future":true}]}`
+	root := t.TempDir()
+	writeFiles(t, root, map[string]string{".aimount/project.json": `{"project_id":"` + projectID + `"}`})
+	for _, tc := range []struct {
+		name, slug, body, wantID, wantError string
+		status                              int
+		text, linked                        bool
+	}{
+		{name: "primary text via linked project", slug: "product", body: goodBindings, wantID: appID, text: true, linked: true},
+		{name: "alias JSON via explicit project", slug: "old_product", body: goodBindings, wantID: appID},
+		{name: "second Application resolves independently", slug: "other", body: goodBindings, wantID: otherID},
+		{name: "no prefix match", slug: "prod", body: goodBindings, wantError: "application_not_found"},
+		{name: "empty bindings", slug: "product", body: `{"version":1,"bindings":[]}`, wantError: "application_not_found"},
+		{name: "duplicate binding even with same ID", slug: "product", body: `{"version":1,"bindings":[{"kind":"application","slug":"product","id":"` + appID + `"},{"kind":"application","slug":"product","id":"` + appID + `"}]}`, wantError: "invalid_response"},
+		{name: "opaque Application ID", slug: "product", body: `{"version":1,"bindings":[{"kind":"application","slug":"product","id":"opaque"}]}`, wantError: "invalid_response"},
+		{name: "wrong Application ID prefix", slug: "product", body: strings.ReplaceAll(goodBindings, appID, "prj_0123456789ABCDEF"), wantError: "invalid_response"},
+		{name: "malformed bindings", slug: "product", body: `{"version":1,"bindings":null}`, wantError: "invalid_response"},
+		{name: "API not found", slug: "product", body: `{"error":{"code":"not_found"}}`, status: 404, wantError: "not_found"},
+		{name: "API permission failure", slug: "product", body: `{"error":{"code":"permission_denied"}}`, status: 403, wantError: "permission_denied"},
+		{name: "transport failure", slug: "product", status: -1, wantError: "transport_unavailable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.Method + " " + r.URL.Path {
+				case "GET /v0/auth/identity":
+					io.WriteString(w, `{"principal":{"user_id":"usr_0123456789ABCDEF"},"authentication":{"method":"pat"}}`)
+				case "GET /v0/projects/" + projectID:
+					io.WriteString(w, `{"id":"`+projectID+`","slug":"example_project","name":"Example","status":"active"}`)
+				case "GET /v0/projects/" + projectID + "/stack/bindings":
+					if tc.status == -1 {
+						panic(http.ErrAbortHandler)
+					}
+					if tc.status > 0 {
+						w.WriteHeader(tc.status)
+					}
+					io.WriteString(w, tc.body)
+				default:
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			args := []string{"resolve", "application", "--root", root, tc.slug, "--api-url", server.URL}
+			if !tc.linked {
+				args = append(args, "--project", projectID)
+			}
+			if !tc.text {
+				args = append(args, "--output", "json")
+			}
+			var out, stderr bytes.Buffer
+			exit := Main(context.Background(), args, map[string]string{"AIMOUNT_TOKEN": "synthetic"}, os.Stdin, &out, &stderr)
+			if stderr.Len() != 0 {
+				t.Fatalf("unexpected stderr %q", &stderr)
+			}
+			if tc.text {
+				if exit != 0 || out.String() != tc.wantID+"\n" {
+					t.Fatalf("exit=%d stdout=%q", exit, &out)
+				}
+				return
+			}
+			var envelope object
+			if err := json.Unmarshal(out.Bytes(), &envelope); err != nil || envelope["version"] != float64(1) || envelope["command"] != "resolve application" {
+				t.Fatalf("unexpected envelope %q: %v", &out, err)
+			}
+			if tc.wantError == "" {
+				if exit != 0 || envelope["ok"] != true || obj(envelope["result"])["application_id"] != tc.wantID {
+					t.Fatalf("exit=%d stdout=%q", exit, &out)
+				}
+			} else if exit != 1 || envelope["ok"] != false || obj(envelope["error"])["code"] != tc.wantError {
+				t.Fatalf("exit=%d stdout=%q want error %s", exit, &out, tc.wantError)
+			}
+		})
+	}
+}
+
+func TestStatusStackUsesProjectOrganizationAndAllBindings(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	const projectID = "prj_0123456789ABCDEF"
+	const projectOrg = "org_0123456789ABCDEF"
+	const selectedOrg = "org_0000000000000001"
+	for _, tc := range []struct {
+		name, bindings string
+		stack, empty   bool
+	}{
+		{name: "ordinary status skips both extra reads"},
+		{name: "empty", stack: true, empty: true, bindings: "[]"},
+		{name: "storage-only is not empty", stack: true, bindings: `[{"kind":"storage","slug":"docs","id":"sto_0123456789ABCDEF"}]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.Method + " " + r.URL.Path {
+				case "GET /v0/auth/identity":
+					io.WriteString(w, `{"principal":{"user_id":"usr_0123456789ABCDEF"},"authentication":{"method":"pat"}}`)
+				case "GET /v0/projects/" + projectID:
+					io.WriteString(w, `{"id":"`+projectID+`","organization_id":"`+projectOrg+`","slug":"playground","name":"Playground","status":"active"}`)
+				case "GET /v0/organizations/" + projectOrg:
+					if !tc.stack {
+						t.Error("ordinary status fetched Organization")
+					}
+					io.WriteString(w, `{"id":"`+projectOrg+`","slug":"project_org","name":"Project Organization"}`)
+				case "GET /v0/projects/" + projectID + "/stack/bindings":
+					if !tc.stack {
+						t.Error("ordinary status fetched bindings")
+					}
+					io.WriteString(w, `{"version":1,"bindings":`+tc.bindings+`}`)
+				default:
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			dir, err := globalDirectory()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := atomicJSON(filepath.Join(dir, "config.json"), object{"api_url": server.URL, "contexts": object{server.URL: object{"user_id": "usr_0123456789ABCDEF", "organization_id": selectedOrg}}}); err != nil {
+				t.Fatal(err)
+			}
+			args := []string{"status", "--project", projectID, "--root", t.TempDir(), "--output=json"}
+			if tc.stack {
+				args = append(args, "--stack")
+			}
+			var out, stderr bytes.Buffer
+			exit := Main(context.Background(), args, map[string]string{"AIMOUNT_TOKEN": "synthetic"}, os.Stdin, &out, &stderr)
+			var envelope object
+			if err := json.Unmarshal(out.Bytes(), &envelope); err != nil || exit != 0 || stderr.Len() != 0 || envelope["ok"] != true {
+				t.Fatalf("exit=%d stdout=%q stderr=%q: %v", exit, &out, &stderr, err)
+			}
+			result := obj(envelope["result"])
+			if result["organization_id"] != selectedOrg || obj(result["project"])["organization_id"] != projectOrg {
+				t.Fatal("wrong Organization identities", result)
+			}
+			if tc.stack {
+				if result["project_organization_slug"] != "project_org" || result["stack_empty"] != tc.empty {
+					t.Fatal("wrong Stack status", result)
+				}
+			} else if _, present := result["stack_empty"]; present {
+				t.Fatal("ordinary status gained opt-in fields", result)
+			}
+		})
 	}
 }
 

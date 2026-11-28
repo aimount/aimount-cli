@@ -76,7 +76,7 @@ func TestDeviceCompletionRelativeBackoffAndCancellation(t *testing.T) {
 			return 200, object{"token_type": "Bearer", "expires_in": 10, "access_token": "aim_pat_0000000000000001_" + strings.Repeat("A", 43)}, nil
 		}
 	}}
-	_, e := exchange(context.Background(), object{"device_code": strings.Repeat("A", 43), "interval": 5, "expires_in": 600}, clock)
+	_, e := exchange(context.Background(), object{"device_code": strings.Repeat("A", 43), "interval": 5, "expires_in": 600}, clock, false)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -100,7 +100,7 @@ func TestDeviceCompletionRelativeBackoffAndCancellation(t *testing.T) {
 		cancel()
 		return 200, object{"token_type": "Bearer", "expires_in": 10, "access_token": "aim_pat_0000000000000001_" + strings.Repeat("A", 43)}, nil
 	}
-	_, e = exchange(ctx, object{"device_code": "a", "interval": 5, "expires_in": 60}, clock)
+	_, e = exchange(ctx, object{"device_code": "a", "interval": 5, "expires_in": 60}, clock, false)
 	c, ok := e.(*CommandError)
 	if !ok || c.Exit != 3 || calls != 2 {
 		t.Fatal(e, calls)

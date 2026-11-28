@@ -40,6 +40,9 @@ func printText(out io.Writer, result Result) {
 		line("API", value["api"])
 		line("Account", obj(obj(value["identity"])["principal"])["user_id"])
 		line("Credential", value["credential_source"])
+		if result.Command == "auth status" {
+			line("Application credentials", hasApplicationCredentials(obj(value["identity"])))
+		}
 		if result.Command == "auth login" {
 			fmt.Fprintln(out, "Signed in. Use 'aimount link' to select a Project.")
 		}
@@ -71,11 +74,44 @@ func printText(out io.Writer, result Result) {
 		line("Account", obj(obj(value["identity"])["principal"])["user_id"])
 		line("Organization", value["organization_id"])
 		line("Credential", value["credential_source"])
+		line("Project Organization slug", value["project_organization_slug"])
+		line("Stack empty", value["stack_empty"])
 		if result.Command == "link" {
 			fmt.Fprintln(out, "Project linked. Use 'aimount pull' to export its Stack.")
 		} else if value["project"] == nil {
 			fmt.Fprintln(out, "No Project selected. Run 'aimount link --project <id>'.")
 		}
+	case "resolve application":
+		fmt.Fprintln(out, value["application_id"])
+	case "runtime-keys create", "webhook-secrets create", "runtime-keys revoke", "webhook-secrets revoke":
+		line("Application", value["application_id"])
+		line("Credential ID", value["id"])
+		line("Name", value["name"])
+		if value["revoked"] == true {
+			fmt.Fprintln(out, "Credential revoked.")
+		} else {
+			fmt.Fprintln(out, "Credential created; the one-time value was saved to --secret-file.")
+		}
+	case "runtime-keys list", "webhook-secrets list":
+		line("Application", value["application_id"])
+		items := objects(value["items"])
+		if len(items) == 0 {
+			fmt.Fprintln(out, "No credentials found.")
+			return
+		}
+		table := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+		if result.Command == "runtime-keys list" {
+			fmt.Fprintln(table, "ID\tNAME\tCREATED\tEXPIRES\tREVOKED")
+			for _, item := range items {
+				fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\n", item["id"], item["name"], item["created_at"], str(item["expires_at"]), str(item["revoked_at"]))
+			}
+		} else {
+			fmt.Fprintln(table, "ID\tCREATED")
+			for _, item := range items {
+				fmt.Fprintf(table, "%s\t%s\n", item["id"], item["created_at"])
+			}
+		}
+		table.Flush()
 	case "plan":
 		context(obj(value["target"]))
 		fmt.Fprint(out, semantic(obj(value["plan"])))

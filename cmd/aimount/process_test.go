@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -215,6 +216,103 @@ func ttyCommand(ctx context.Context, bin string, args ...string) *exec.Cmd {
 }
 func isolatedEnv(home string, extra ...string) []string {
 	return append([]string{"HOME=" + home, "XDG_CONFIG_HOME=" + filepath.Join(home, "config"), "PATH=" + os.Getenv("PATH")}, extra...)
+}
+
+func TestExecutableApplyRequireEmptyReviewsThenUsesCAS(t *testing.T) {
+	bin := buildBinary(t)
+	home := t.TempDir()
+	root := filepath.Join(home, "stack")
+	if err := os.MkdirAll(filepath.Join(root, "applications"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "applications/product.yaml"), []byte("version: 1\nkind: application\nslug: product\nspec:\n  name: Reviewed application\n  models: {}\n  agents: {}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	const readSet = `{"resources":[],"bindings":[],"membership_incarnation":"00000000-0000-4000-8000-000000000001","membership_version":1,"membership_access_epoch":0,"project_lifecycle_epoch":0,"credentials":[]}`
+	var writes atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "GET /v0/auth/identity":
+			io.WriteString(w, `{"principal":{"user_id":"usr_0123456789ABCDEF"},"authentication":{"method":"pat"}}`)
+		case "GET /v0/projects/prj_0123456789ABCDEF":
+			io.WriteString(w, `{"id":"prj_0123456789ABCDEF","slug":"example_project","status":"active","name":"Safe"}`)
+		case "POST /v0/projects/prj_0123456789ABCDEF/stack/plan":
+			io.WriteString(w, `{"version":1,"read_set":`+readSet+`,"changes":[{"kind":"application","slug":"product","operation":"CREATE","after":{"name":"Reviewed application","models":{},"agents":{}}}]}`)
+		case "POST /v0/projects/prj_0123456789ABCDEF/stack/apply":
+			writes.Add(1)
+			var input struct {
+				ReadSet map[string]any `json:"read_set"`
+				Prune   *bool          `json:"prune"`
+			}
+			var expected map[string]any
+			if err := json.Unmarshal([]byte(readSet), &expected); err != nil {
+				t.Error(err)
+			}
+			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+				t.Error(err)
+			}
+			actualWire, _ := json.Marshal(input.ReadSet)
+			expectedWire, _ := json.Marshal(expected)
+			if !bytes.Equal(actualWire, expectedWire) || input.Prune == nil || *input.Prune || !strings.HasPrefix(r.Header.Get("Idempotency-Key"), "s1.") {
+				t.Error("apply did not carry the approved read set, non-prune mode and idempotency key")
+			}
+			io.WriteString(w, `{"version":1,"changed":true,"resources":[{"kind":"application","id":"app_0123456789ABCDEF","etag":"new-etag","version":1,"revision":1,"operation":"CREATE","changed":true}]}`)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	args := []string{"apply", "--require-empty", "--root", root, "--api-url", server.URL, "--project", "prj_0123456789ABCDEF"}
+	cmd := ttyCommand(ctx, bin, append(args, "--output=json")...)
+	cmd.Env = isolatedEnv(home, "AIMOUNT_TOKEN=synthetic")
+	out, err := cmd.CombinedOutput()
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 3 || !bytes.Contains(out, []byte(`"code":"confirmation_required"`)) || bytes.Contains(out, []byte("[y/N] ")) || writes.Load() != 0 {
+		t.Fatalf("JSON apply prompted or mutated: %v %s", err, out)
+	}
+
+	// Redirect only stdout, as the launcher does, so the operator sees the preview.
+	receipt := filepath.Join(home, "receipt")
+	wrapper := filepath.Join(home, "capture")
+	if err := os.WriteFile(wrapper, []byte("#!/bin/sh\nexec \"$@\" >\"$AIMOUNT_TEST_RECEIPT\"\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cmd = ttyCommand(ctx, wrapper, append([]string{bin}, args...)...)
+	cmd.Env = isolatedEnv(home, "AIMOUNT_TOKEN=synthetic", "AIMOUNT_TEST_RECEIPT="+receipt)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdin.Close()
+	output := &processOutput{notify: make(chan struct{}, 1)}
+	cmd.Stdout, cmd.Stderr = output, output
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	for !strings.Contains(output.String(), "Apply this complete Project plan? [y/N]") {
+		select {
+		case <-output.notify:
+		case <-ctx.Done():
+			cmd.Wait()
+			t.Fatal("confirmation prompt not visible", output.String())
+		}
+	}
+	preview := output.String()
+	writesBefore := writes.Load()
+	io.WriteString(stdin, "y\n")
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("approved apply failed: %v %s", err, output.String())
+	}
+	if !strings.Contains(preview, "CREATE application product") || !strings.Contains(preview, "Reviewed application") || writesBefore != 0 || writes.Load() != 1 {
+		t.Fatalf("missing plan or premature mutation: %q, writes %d before/%d after", preview, writesBefore, writes.Load())
+	}
+	data, err := os.ReadFile(receipt)
+	if err != nil || !strings.HasSuffix(string(data), "\n  CREATE application app_0123456789ABCDEF\n") || bytes.Contains(data, []byte("[y/N]")) {
+		t.Fatalf("invalid stdout receipt: %v %q", err, data)
+	}
 }
 
 func TestExecutableManualExactApplyRetry(t *testing.T) {
@@ -717,6 +815,479 @@ func TestExecutableDeviceValidatedHTTPSAndCancelledInFlight(t *testing.T) {
 					if json.Unmarshal(raw, &v) != nil || v["ok"] != true {
 						t.Fatal("bad auth result")
 					}
+				}
+			}
+		})
+	}
+}
+
+func TestExecutableScopedDeviceLogin(t *testing.T) {
+	bin := buildBinary(t)
+	for _, scenario := range []string{"missing-grant", "same-user", "different-user", "first-login", "expired", "logout", "other-login"} {
+		t.Run(scenario, func(t *testing.T) {
+			t.Parallel()
+			home := t.TempDir()
+			fake := filepath.Join(home, "bin")
+			if err := os.Mkdir(fake, 0700); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range []string{"open", "xdg-open"} {
+				if err := os.WriteFile(filepath.Join(fake, name), []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			const oldPAT = "old-synthetic-PAT"
+			newPAT := "aim_pat_0123456789ABCDEF_" + strings.Repeat("A", 43)
+			otherPAT := "aim_pat_0000000000000001_" + strings.Repeat("B", 43)
+			var authorizations atomic.Int32
+			entered, release := make(chan struct{}), make(chan struct{})
+			s := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/v0/auth/identity":
+					user, scope := "usr_0123456789ABCDEF", ""
+					switch r.Header.Get("Authorization") {
+					case "Bearer " + otherPAT:
+						if scenario != "other-login" {
+							t.Error("unexpected concurrent PAT")
+						}
+						scope = `,"application_credentials":true`
+					case "Bearer " + oldPAT:
+						if scenario == "expired" {
+							w.WriteHeader(401)
+							io.WriteString(w, `{"error":{"code":"invalid_credential"}}`)
+							return
+						}
+					case "Bearer " + newPAT:
+						scope = `,"application_credentials":true,"unknown":"` + newPAT + `"`
+						if scenario == "different-user" {
+							user = "usr_0000000000000001"
+						}
+					default:
+						t.Error("wrong PAT checked")
+					}
+					io.WriteString(w, `{"principal":{"type":"user","user_id":"`+user+`"},"authentication":{"method":"pat"`+scope+`}}`)
+				case "/v0/oauth/device/authorization":
+					n := authorizations.Add(1)
+					if r.FormValue("scope") != "application_credentials" || r.FormValue("client_id") != "aimount-app-cli" {
+						t.Error("scope not requested with Device authorization")
+					}
+					code := strings.Repeat("b", 43)
+					if n == 2 && scenario == "other-login" {
+						code = strings.Repeat("c", 43)
+					}
+					io.WriteString(w, `{"device_code":"`+code+`","user_code":"BCDF-GHJK-LMNP","expires_in":60,"interval":5,"verification_uri":"https://console.example/device","verification_uri_complete":"https://console.example/device?request_id=dvr_0123456789ABCDEF"}`)
+				case "/v0/oauth/token":
+					if r.FormValue("scope") != "" || r.FormValue("grant_type") != "urn:ietf:params:oauth:grant-type:device_code" {
+						t.Error("wrong token polling parameters")
+					}
+					pat := newPAT
+					if scenario == "other-login" && r.FormValue("device_code") == strings.Repeat("c", 43) {
+						pat = otherPAT
+					} else if scenario == "logout" || scenario == "other-login" {
+						close(entered)
+						select {
+						case <-release:
+						case <-r.Context().Done():
+							return
+						}
+					}
+					scope := ""
+					if scenario != "missing-grant" {
+						scope = `,"scope":"application_credentials"`
+					}
+					io.WriteString(w, `{"token_type":"Bearer","expires_in":3600,"access_token":"`+pat+`"`+scope+`}`)
+				default:
+					t.Errorf("unexpected request: %s", r.URL.Path)
+					w.WriteHeader(404)
+				}
+			}))
+			defer s.Close()
+			ca := filepath.Join(home, "ca.pem")
+			if err := os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: s.Certificate().Raw}), 0600); err != nil {
+				t.Fatal(err)
+			}
+			dir := filepath.Join(home, "config", "aimount")
+			if runtime.GOOS == "darwin" {
+				dir = filepath.Join(home, "Library/Application Support/aimount")
+			}
+			if err := os.MkdirAll(dir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, "auth.json")
+			config := filepath.Join(dir, "config.json")
+			configBefore := []byte(`{"contexts":{"` + s.URL + `":{"user_id":"usr_0123456789ABCDEF","organization_id":"org_0123456789ABCDEF"}}}`)
+			if scenario != "first-login" {
+				if err := os.WriteFile(path, []byte(`{"tokens":{"`+s.URL+`":"`+oldPAT+`","https://another.example":"other-api"}}`), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(config, configBefore, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+			defer cancel()
+			env := isolatedEnv(home, "PATH="+fake+":"+os.Getenv("PATH"), "SSL_CERT_FILE="+ca)
+			if scenario == "same-user" {
+				plain := exec.CommandContext(ctx, bin, "auth", "login", "--api-url", s.URL, "--output=json")
+				plain.Env = env
+				if _, err := plain.CombinedOutput(); err != nil || authorizations.Load() != 0 {
+					t.Fatal("plain login started new authorization despite a saved PAT", err)
+				}
+			}
+			scopedLogin := func(ctx context.Context) *exec.Cmd {
+				cmd := ttyCommand(ctx, bin, "auth", "login", "--application-credentials", "--api-url", s.URL)
+				cmd.Env = env
+				return cmd
+			}
+			optIn := scopedLogin(ctx)
+			var output bytes.Buffer
+			optIn.Stdout, optIn.Stderr = &output, &output
+			if err := optIn.Start(); err != nil {
+				t.Fatal(err)
+			}
+			defer optIn.Wait()
+			wantAuthorizations := int32(1)
+			if scenario == "logout" || scenario == "other-login" {
+				select {
+				case <-entered:
+				case <-ctx.Done():
+					t.Fatal("first token poll did not arrive")
+				}
+				if scenario == "logout" {
+					logout := exec.CommandContext(ctx, bin, "auth", "logout", "--api-url", s.URL)
+					logout.Env = env
+					if err := logout.Run(); err != nil {
+						close(release)
+						t.Fatal("concurrent logout failed", err)
+					}
+				} else {
+					wantAuthorizations++
+					if out, err := scopedLogin(ctx).CombinedOutput(); err != nil || bytes.Contains(out, []byte(otherPAT)) {
+						close(release)
+						t.Fatal("concurrent login failed or disclosed PAT", err)
+					}
+				}
+				close(release)
+			}
+			err := optIn.Wait()
+			out := output.Bytes()
+			if authorizations.Load() != wantAuthorizations || bytes.Contains(out, []byte(newPAT)) || bytes.Contains(out, []byte(oldPAT)) || bytes.Contains(out, []byte("Choose Organization")) {
+				t.Fatal("unexpected scoped authorization count/prompt or disclosed a PAT")
+			}
+			configAfter, configErr := os.ReadFile(config)
+			if scenario == "first-login" {
+				if !os.IsNotExist(configErr) {
+					t.Fatal("scoped first login created Organization context", configErr)
+				}
+			} else if configErr != nil || !bytes.Equal(configAfter, configBefore) {
+				t.Fatal("scoped login changed Organization context", configErr)
+			}
+			after, readErr := os.ReadFile(path)
+			var auth struct{ Tokens map[string]string }
+			if readErr != nil || json.Unmarshal(after, &auth) != nil || (scenario != "first-login" && auth.Tokens["https://another.example"] != "other-api") {
+				t.Fatal("auth state unreadable or lost another API's authorization", readErr)
+			}
+			wantToken, wantError := newPAT, ""
+			switch scenario {
+			case "missing-grant":
+				wantToken, wantError = oldPAT, "did not grant Application credential consent"
+			case "different-user":
+				wantToken, wantError = oldPAT, "different account"
+			case "logout":
+				wantToken, wantError = "", "Saved authorization changed"
+			case "other-login":
+				wantToken, wantError = otherPAT, "Saved authorization changed"
+			}
+			if auth.Tokens[s.URL] != wantToken || (err != nil) != (wantError != "") || !bytes.Contains(out, []byte(wantError)) {
+				t.Fatal("wrong scoped login result or saved authorization", err)
+			}
+			if err != nil {
+				return
+			}
+			status := exec.CommandContext(ctx, bin, "auth", "status", "--api-url", s.URL, "--output=json")
+			status.Env = env
+			out, err = status.CombinedOutput()
+			if err != nil || !bytes.Contains(out, []byte(`"application_credentials":true`)) || bytes.Contains(out, []byte(newPAT)) {
+				t.Fatal("status did not safely project opt-in", err)
+			}
+		})
+	}
+}
+
+func TestExecutableApplicationCredentials(t *testing.T) {
+	bin := buildBinary(t)
+	const project = "prj_0123456789ABCDEF"
+	const app = "app_0123456789ABCDEF"
+	const id = "0000000000000002"
+	const stamp = "2026-11-01T00:00:00Z"
+	const base = "/v0/projects/" + project
+	secret := strings.Repeat("A", 43)
+	for _, tc := range []struct {
+		name, group, scenario, expectedCode string
+	}{
+		{"runtime", "runtime-keys", "success", ""},
+		{"webhook", "webhook-secrets", "success", ""},
+		{"scope", "runtime-keys", "unscoped", "application_credentials_required"},
+		{"app-guard", "runtime-keys", "guard", "application_changed"},
+		{"symlink", "runtime-keys", "symlink", "credential_file_exists"},
+		{"pending-symlink", "runtime-keys", "pending-symlink", "credential_file_pending"},
+		{"refusal", "webhook-secrets", "refusal", "tool_secret_limit"},
+		{"server-error", "webhook-secrets", "server-error", "credential_create_unknown"},
+		{"lost-response", "webhook-secrets", "lost-response", "credential_create_unknown"},
+		{"malformed", "runtime-keys", "wrong-target", "credential_create_unknown"},
+		{"race", "webhook-secrets", "race", "credential_file_unconfirmed"},
+		{"lost-stage", "runtime-keys", "lost-stage", "credential_file_unconfirmed"},
+		{"receipt-blocked", "webhook-secrets", "receipt-blocked", "credential_file_unconfirmed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			final := filepath.Join(home, "secret")
+			marker := final + ".pending"
+			if tc.scenario == "symlink" || tc.scenario == "pending-symlink" {
+				which := final
+				if tc.scenario == "pending-symlink" {
+					which = marker
+				}
+				if err := os.Symlink(filepath.Join(home, "missing"), which); err != nil {
+					t.Fatal(err)
+				}
+			}
+			route := base + "/applications/" + app + "/tool-secrets"
+			value := "whsec_" + secret
+			runtimeKey := tc.group == "runtime-keys"
+			if runtimeKey {
+				route = base + "/applications/" + app + "/runtime-credentials"
+				value = "aim_runtime_" + id + "_" + secret
+			}
+			meta := `{"id":"` + id + `","created_at":"` + stamp + `","application_id":"` + app + `","name":"local_backend","future_hash":"` + value + `"}`
+			if tc.scenario == "wrong-target" {
+				meta = strings.Replace(meta, app, "app_0000000000000001", 1)
+			}
+			var posts atomic.Int32
+			var lists atomic.Int32
+			var revokes atomic.Int32
+			entered, release := make(chan struct{}), make(chan struct{})
+			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Authorization") != "Bearer synthetic-PAT" || r.Header.Get("Idempotency-Key") != "" || r.Header.Get("If-Match") != "" {
+					t.Error("unexpected auth or mutation headers")
+				}
+				switch r.Method + " " + r.URL.Path {
+				case "GET /v0/auth/identity":
+					scope := `,"application_credentials":true`
+					if tc.scenario == "unscoped" {
+						scope = ""
+					}
+					io.WriteString(w, `{"principal":{"user_id":"usr_0123456789ABCDEF"},"authentication":{"method":"pat"`+scope+`}}`)
+				case "GET " + base:
+					io.WriteString(w, `{"id":"`+project+`","slug":"example","name":"Example","status":"active"}`)
+				case "GET " + base + "/stack/bindings":
+					io.WriteString(w, `{"version":1,"bindings":[{"kind":"application","slug":"paperdesk","id":"`+app+`"}]}`)
+				case "POST " + route:
+					posts.Add(1)
+					body, _ := io.ReadAll(r.Body)
+					if runtimeKey && (string(body) != `{"name":"local_backend"}` || r.Header.Get("Content-Type") != "application/json") || !runtimeKey && len(body) != 0 {
+						t.Error("wrong credential create wire body")
+					}
+					info, err := os.Stat(marker)
+					if err != nil || !info.IsDir() || info.Mode().Perm() != 0700 {
+						t.Error("owner-only pending marker absent at POST", err)
+					}
+					if _, err := os.Lstat(final); !os.IsNotExist(err) {
+						t.Error("final visible before file publication")
+					}
+					switch tc.scenario {
+					case "race":
+						close(entered)
+						<-release
+					case "lost-stage":
+						if err := os.Remove(filepath.Join(marker, "value")); err != nil {
+							t.Error("cannot simulate disappearing staging file", err)
+						}
+					case "receipt-blocked":
+						if err := os.Mkdir(filepath.Join(marker, "receipt.json"), 0700); err != nil {
+							t.Error("cannot simulate receipt creation failure", err)
+						}
+					case "refusal":
+						w.WriteHeader(409)
+						io.WriteString(w, `{"error":{"code":"tool_secret_limit","message":"`+value+`"}}`)
+						return
+					case "server-error":
+						w.WriteHeader(503)
+						io.WriteString(w, `{"error":{"code":"`+strings.ToLower(value)+`"}}`)
+						return
+					case "lost-response":
+						conn, _, err := w.(http.Hijacker).Hijack()
+						if err != nil {
+							t.Error(err)
+						} else {
+							conn.Close()
+						}
+						return
+					}
+					w.WriteHeader(201)
+					if runtimeKey {
+						io.WriteString(w, `{"credential":`+meta+`,"token":"`+value+`"}`)
+					} else {
+						io.WriteString(w, strings.TrimSuffix(meta, "}")+`,"secret":"`+value+`"}`)
+					}
+				case "GET " + route:
+					lists.Add(1)
+					if runtimeKey && r.URL.RawQuery == "" {
+						io.WriteString(w, `{"items":[],"next_cursor":"synthetic+/"}`)
+						return
+					}
+					if runtimeKey && r.URL.Query().Get("cursor") != "synthetic+/" {
+						t.Error("runtime key list did not advance cursor")
+					}
+					io.WriteString(w, `{"items":[`+meta+`],"next_cursor":null}`)
+				case "DELETE " + route + "/" + id:
+					revokes.Add(1)
+					w.WriteHeader(204)
+				default:
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(404)
+				}
+			}))
+			defer s.Close()
+			defer func() {
+				select {
+				case <-release:
+				default:
+					close(release)
+				}
+			}()
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			expected := app
+			if tc.scenario == "guard" {
+				expected = "app_0000000000000001"
+			}
+			command := func(action string, extra ...string) *exec.Cmd {
+				args := append([]string{tc.group, action, "--output=json", "--api-url", s.URL, "--project", project, "--application", "paperdesk", "--expect-application-id", expected}, extra...)
+				cmd := exec.CommandContext(ctx, bin, args...)
+				cmd.Env = isolatedEnv(home, "AIMOUNT_TOKEN=synthetic-PAT")
+				return cmd
+			}
+			parse := func(raw []byte, err error, action, expectedCode string) map[string]any {
+				t.Helper()
+				var envelope struct {
+					Command string         `json:"command"`
+					Result  map[string]any `json:"result"`
+					Error   struct {
+						Code, Message string
+						Details       map[string]any
+					} `json:"error"`
+				}
+				if bytes.Contains(bytes.ToLower(raw), []byte(strings.ToLower(value))) || bytes.Contains(raw, []byte("future_hash")) || bytes.Contains(raw, []byte("synthetic-PAT")) {
+					t.Fatal("credential leaked in process output")
+				}
+				if json.Unmarshal(raw, &envelope) != nil || envelope.Command != tc.group+" "+action || envelope.Error.Code != expectedCode || (err != nil) != (expectedCode != "") {
+					t.Fatalf("wrong %s envelope: %s, %v", action, raw, err)
+				}
+				switch expectedCode {
+				case "credential_file_unconfirmed":
+					if len(envelope.Error.Details) != 2 || envelope.Error.Details["id"] != id || envelope.Error.Details["application_id"] != app || !strings.Contains(envelope.Error.Message, id) || !strings.Contains(envelope.Error.Message, app) {
+						t.Fatal("known issuance did not report exact safe IDs")
+					}
+				case "credential_create_unknown":
+					if len(envelope.Error.Details) != 0 || strings.Contains(envelope.Error.Message, id) {
+						t.Fatal("unknown issuance claimed a credential ID")
+					}
+				}
+				return envelope.Result
+			}
+			args := []string{"--secret-file", final}
+			if runtimeKey {
+				args = append(args, "--name", "local_backend")
+			}
+			cmd := command("create", args...)
+			var out bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &out, &out
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			if tc.scenario == "race" {
+				select {
+				case <-entered:
+				case <-ctx.Done():
+					t.Fatal("POST did not arrive")
+				}
+				raw, err := command("create", args...).CombinedOutput()
+				parse(raw, err, "create", "credential_file_pending")
+				if err := os.WriteFile(final, []byte("do not replace"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				close(release)
+			}
+			err := cmd.Wait()
+			result := parse(out.Bytes(), err, "create", tc.expectedCode)
+			expectedPosts := int32(1)
+			switch tc.scenario {
+			case "unscoped", "guard", "symlink", "pending-symlink":
+				expectedPosts = 0
+			}
+			if posts.Load() != expectedPosts {
+				t.Fatalf("unexpected POST count: %d", posts.Load())
+			}
+			_, err = os.Lstat(marker)
+			if (err == nil) != (tc.expectedCode == "credential_create_unknown" || tc.expectedCode == "credential_file_unconfirmed" || tc.scenario == "pending-symlink") {
+				t.Fatal("wrong pending marker state", err)
+			}
+			receiptPath := filepath.Join(marker, "receipt.json")
+			switch tc.scenario {
+			case "race", "lost-stage":
+				receipt, err := os.ReadFile(receiptPath)
+				info, statErr := os.Stat(receiptPath)
+				var fields map[string]string
+				if err != nil || statErr != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || json.Unmarshal(receipt, &fields) != nil || len(fields) != 2 || fields["id"] != id || fields["application_id"] != app {
+					t.Fatal("receipt does not contain only the validated metadata in a private file", err, statErr)
+				}
+			case "receipt-blocked":
+				staged, err := os.ReadFile(filepath.Join(marker, "value"))
+				if err != nil || len(staged) != 0 {
+					t.Fatal("secret staging started before receipt storage", err)
+				}
+			default:
+				if _, err := os.Lstat(receiptPath); tc.expectedCode == "credential_create_unknown" && !os.IsNotExist(err) {
+					t.Fatal("unknown issuance produced a trusted receipt", err)
+				}
+			}
+			if tc.scenario == "receipt-blocked" || tc.scenario == "lost-stage" {
+				if _, err := os.Lstat(final); !os.IsNotExist(err) {
+					t.Fatal("secret published despite local file failure", err)
+				}
+			}
+			if tc.expectedCode == "credential_create_unknown" || tc.expectedCode == "credential_file_unconfirmed" {
+				raw, err := command("create", args...).CombinedOutput()
+				parse(raw, err, "create", "credential_file_pending")
+				if posts.Load() != expectedPosts {
+					t.Fatal("unreconciled marker allowed another POST")
+				}
+			}
+			if tc.scenario == "race" {
+				b, err := os.ReadFile(final)
+				if err != nil || string(b) != "do not replace" {
+					t.Fatal("existing entry overwritten", err)
+				}
+			}
+			if tc.scenario == "success" {
+				b, err := os.ReadFile(final)
+				info, statErr := os.Lstat(final)
+				if err != nil || statErr != nil || string(b) != value || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
+					t.Fatal("secret file missing, wrong, or not owner-only", err, statErr)
+				}
+				if result["id"] != id || result["application_id"] != app {
+					t.Fatal("create metadata missing")
+				}
+				raw, err := command("list").CombinedOutput()
+				items, _ := parse(raw, err, "list", "")["items"].([]any)
+				if len(items) != 1 || items[0].(map[string]any)["id"] != id || lists.Load() != map[bool]int32{true: 2, false: 1}[runtimeKey] {
+					t.Fatal("wrong list results")
+				}
+				raw, err = command("revoke", id).CombinedOutput()
+				result = parse(raw, err, "revoke", "")
+				if result["id"] != id || result["revoked"] != true || revokes.Load() != 1 {
+					t.Fatal("exact-ID revoke not acknowledged")
 				}
 			}
 		})

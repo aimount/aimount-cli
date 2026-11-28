@@ -88,7 +88,7 @@ func deviceForm(h *http.Client, api string) func(context.Context, string, map[st
 		return response.StatusCode, obj(v), nil
 	}
 }
-func deviceLogin(ctx context.Context, api string, errOut io.Writer) (string, error) {
+func deviceLogin(ctx context.Context, api string, errOut io.Writer, applicationCredentials bool) (string, error) {
 	u, e := url.Parse(api)
 	if e != nil || u.Scheme != "https" {
 		return "", errors.New("Device Flow requires validated HTTPS, including locally")
@@ -96,7 +96,11 @@ func deviceLogin(ctx context.Context, api string, errOut io.Writer) (string, err
 	h := boundedHTTP()
 	defer h.CloseIdleConnections()
 	request := deviceForm(h, api)
-	status, device, e := request(ctx, "/v0/oauth/device/authorization", map[string]string{"client_id": "aimount-app-cli"}, 15*time.Second)
+	form := map[string]string{"client_id": "aimount-app-cli"}
+	if applicationCredentials {
+		form["scope"] = applicationCredentialsScope
+	}
+	status, device, e := request(ctx, "/v0/oauth/device/authorization", form, 15*time.Second)
 	if ctx.Err() != nil {
 		return "", commandError("cancelled", "Device login cancelled before authorization; no local publication", 3)
 	}
@@ -131,9 +135,9 @@ func deviceLogin(ctx context.Context, api string, errOut io.Writer) (string, err
 	device["expires_in"] = expires
 	device["interval"] = interval
 	defer func() { device["device_code"] = "" }()
-	return exchange(ctx, device, deviceClock{now: func() time.Duration { return time.Since(start) }, wait: waitContext, request: request})
+	return exchange(ctx, device, deviceClock{now: func() time.Duration { return time.Since(start) }, wait: waitContext, request: request}, applicationCredentials)
 }
-func exchange(ctx context.Context, device object, clock deviceClock) (string, error) {
+func exchange(ctx context.Context, device object, clock deviceClock, applicationCredentials bool) (string, error) {
 	expires, ok := exactInt(device["expires_in"], 600, 1)
 	if !ok {
 		return "", errors.New("Device authorization failed")
@@ -197,6 +201,9 @@ func exchange(ctx context.Context, device object, clock deviceClock) (string, er
 			_, expiresOK := exactInt(v["expires_in"], maxSafe, 1)
 			if v["token_type"] != "Bearer" || !expiresOK || !regexp.MustCompile(`^aim_pat_[0-9A-HJKMNP-TV-Z]{16}_[A-Za-z0-9_-]{43}$`).MatchString(str(v["access_token"])) {
 				return "", errors.New("Device token response invalid; no replacement login was started")
+			}
+			if applicationCredentials && v["scope"] != applicationCredentialsScope {
+				return "", errors.New("Device response did not grant Application credential consent; no local publication")
 			}
 			return str(v["access_token"]), nil
 		}

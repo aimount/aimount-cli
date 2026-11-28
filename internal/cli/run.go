@@ -47,6 +47,9 @@ func Main(ctx context.Context, args []string, env map[string]string, in *os.File
 	var ae *APIError
 	if errors.As(e, &ce) {
 		exit, code = ce.Exit, ce.Code
+		if ce.Details != nil {
+			details = ce.Details
+		}
 	} else if errors.As(e, &ae) {
 		code = ae.Code
 		if (ae.Status == 409 || ae.Status == 412) && !ae.Unknown && ae.Code != "stack_prune_required" {
@@ -78,8 +81,8 @@ func Main(ctx context.Context, args []string, env map[string]string, in *os.File
 		command := ""
 		if selected {
 			command = o.Command
-			if slices.Contains([]string{"auth", "projects"}, o.Command) {
-				command += " " + strings.Join(o.Args, " ")
+			if slices.Contains([]string{"auth", "projects", "resolve", "runtime-keys", "webhook-secrets"}, o.Command) {
+				command += " " + o.Args[0]
 			}
 		}
 		fmt.Fprintln(out, wire(object{"version": 1, "command": command, "ok": false, "error": object{"code": code, "message": e.Error(), "details": details}, "diagnostics": diagnostics}))

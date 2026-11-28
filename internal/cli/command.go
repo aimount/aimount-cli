@@ -98,10 +98,10 @@ func parseOptions(args []string, env map[string]string, tty bool) (Options, erro
 	}
 	leaf := func(parent *cobra.Command, name, short, example string) *cobra.Command {
 		cmd := &cobra.Command{Use: name, Short: short, Example: example, Args: noArgs}
-		cmd.RunE = func(cmd *cobra.Command, _ []string) error {
+		cmd.RunE = func(_ *cobra.Command, args []string) error {
 			o.Command = name
 			if parent != root {
-				o.Command, o.Args = parent.Name(), []string{name}
+				o.Command, o.Args = parent.Name(), append([]string{name}, args...)
 			}
 			return nil
 		}
@@ -117,7 +117,55 @@ func parseOptions(args []string, env map[string]string, tty bool) (Options, erro
 	root.Args = noArgs
 	root.RunE = func(cmd *cobra.Command, _ []string) error { return cmd.Help() }
 	auth := group("auth", "Sign in and manage local App authorization")
-	leaf(auth, "login", "Sign in through your browser using Device Flow", "  aimount auth login --api-url https://api.aimount.io")
+	login := leaf(auth, "login", "Sign in through your browser using Device Flow", "  aimount auth login --api-url https://api.aimount.io\n  aimount auth login --application-credentials")
+	login.Flags().BoolVar(&o.ApplicationCredentials, "application-credentials", false, "Request consent to manage Application credentials")
+	for _, name := range []string{"runtime-keys", "webhook-secrets"} {
+		credentials := group(name, "Manage Application "+strings.ReplaceAll(name, "-", " "))
+		for _, action := range []string{"create", "list", "revoke"} {
+			cmd := leaf(credentials, action, action+" Application "+strings.ReplaceAll(name, "-", " "), "")
+			for _, f := range []struct {
+				name, usage string
+				target      *string
+			}{
+				{"application", "Application slug or alias in the target Project (required)", &o.Application},
+				{"expect-application-id", "Refuse if the slug resolves to a different Application ID", &o.ExpectedApplicationID},
+				{"secret-file", "New file to receive the one-time secret (required)", &o.SecretFile},
+				{"name", "Name for the runtime key (required)", &o.CredentialName},
+			} {
+				if f.name == "secret-file" && action != "create" || f.name == "name" && (action != "create" || name != "runtime-keys") {
+					continue
+				}
+				input := &stringOption{target: f.target}
+				inputs[cmd.CommandPath()+"/"+f.name] = input
+				cmd.Flags().Var(input, f.name, f.usage)
+			}
+			if action == "revoke" {
+				cmd.Use = "revoke <credential-id>"
+			}
+			cmd.Args = func(cmd *cobra.Command, args []string) error {
+				if action == "revoke" {
+					if len(args) != 1 || !credentialIDValid(args[0]) {
+						return commandError("command_invalid", "Provide one exact credential ID", 1)
+					}
+				} else if err := noArgs(cmd, args); err != nil {
+					return err
+				}
+				if !nameRE.MatchString(o.Application) {
+					return commandError("command_invalid", "Provide a valid --application slug", 1)
+				}
+				if o.ExpectedApplicationID != "" && !idValid(o.ExpectedApplicationID, "app") {
+					return commandError("command_invalid", "Provide a valid --expect-application-id", 1)
+				}
+				if action == "create" && o.SecretFile == "" {
+					return commandError("command_invalid", "Provide --secret-file", 1)
+				}
+				if action == "create" && name == "runtime-keys" && !nameRE.MatchString(o.CredentialName) {
+					return commandError("command_invalid", "Provide a valid runtime key --name", 1)
+				}
+				return nil
+			}
+		}
+	}
 	leaf(auth, "logout", "Remove local authorization for the selected API", "")
 	leaf(auth, "status", "Show current account and credential source", "")
 	projects := group("projects", "Discover Projects in the selected Organization")
@@ -126,12 +174,23 @@ func parseOptions(args []string, env map[string]string, tty bool) (Options, erro
 	link := leaf(root, "link", "Bind a Stack directory to an existing Project", "  aimount link --project prj_0000000000000001 --root ./stack")
 	link.Flags().BoolVar(&o.Yes, "yes", false, "Approve replacing the local Project binding")
 	leaf(root, "unlink", "Remove the local Project binding", "")
-	leaf(root, "status", "Show API, account and Project context", "")
+	status := leaf(root, "status", "Show API, account and Project context", "")
+	status.Flags().BoolVar(&o.Stack, "stack", false, "Also show the Project's Organization slug and whether its Stack is empty")
+	resolve := group("resolve", "Resolve a saved Stack slug to its resource ID")
+	application := leaf(resolve, "application", "Resolve an Application's primary slug or alias", "  aimount resolve application paperdesk")
+	application.Use = "application <slug>"
+	application.Args = func(_ *cobra.Command, args []string) error {
+		if len(args) != 1 || !nameRE.MatchString(args[0]) {
+			return commandError("command_invalid", "Provide one valid Application slug. Run 'aimount resolve application --help' for usage.", 1)
+		}
+		return nil
+	}
 	plan := leaf(root, "plan", "Review changes for the complete Project Stack", "  aimount plan --root ./stack")
 	plan.Flags().BoolVar(&o.Prune, "prune", false, "Allow planning deletion of omitted resources")
 	apply := leaf(root, "apply", "Review and apply the complete Project Stack", "  aimount apply --root ./stack\n  aimount apply --root ./stack --auto-approve")
 	apply.Flags().BoolVar(&o.Prune, "prune", false, "Allow irreversible deletion of omitted resources and owned data")
 	apply.Flags().BoolVar(&o.Approve, "auto-approve", false, "Apply without a confirmation prompt (does not enable prune)")
+	apply.Flags().BoolVar(&o.RequireEmpty, "require-empty", false, "Apply only to a Project with no Stack resources or bindings")
 	pull := leaf(root, "pull", "Export the Project Stack into local YAML files", "  aimount pull --root ./stack")
 	pull.Flags().BoolVar(&o.Force, "force", false, "Replace existing managed files; preserve unmanaged files")
 	pull.Flags().BoolVar(&o.Recover, "recover", false, "Recover an interrupted local pull without contacting the API")
@@ -210,6 +269,9 @@ func parseOptions(args []string, env map[string]string, tty bool) (Options, erro
 				return o, fmt.Errorf("--%s is not supported by this command", name)
 			}
 		}
+	}
+	if o.RequireEmpty && o.Prune {
+		return o, errors.New("--require-empty cannot be combined with --prune")
 	}
 	explicit := map[string]bool{}
 	for name, input := range inputs {
