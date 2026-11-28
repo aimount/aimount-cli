@@ -53,7 +53,10 @@ aimount projects list
 aimount link --project prj_0000000000000001 --root ./stack
 aimount unlink --root ./stack
 aimount status --root ./stack
+aimount status --stack --project prj_0000000000000001 --output json
+aimount resolve application paperdesk --root ./stack
 aimount plan --root ./stack
+aimount apply --root ./stack --require-empty  # First apply to an empty Project
 aimount apply --root ./stack --prune --auto-approve
 aimount pull --root ./stack --force
 aimount pull --root ./stack --recover # Offline recovery only, not a new download
@@ -62,15 +65,16 @@ aimount completion zsh      # Generate an offline shell completion script
 
 Commands and flags use Cobra. `help [command]`, `-h` and `--help` work at every
 level without reading credentials/configuration or contacting the API, even when
-target environment values are invalid. Bare `auth` and `projects` show their
-subcommands. Completion supports bash, zsh, fish and PowerShell; generated scripts
+target environment values are invalid. Bare `auth`, `projects` and `resolve` show
+their subcommands. Completion supports bash, zsh, fish and PowerShell; generated scripts
 contain no resource discovery or stored credentials. Install a generated script
 using your shell's normal completion setup.
 
 Flags may be interspersed with command arguments. Common flags are `--root`,
 `--api-url`, `--project`, `--organization`, `--output text|json`,
 `--non-interactive` and `--no-color`. `--prune` belongs to plan/apply;
-`--auto-approve` to apply, `--force` to pull and `--yes` to link.
+`--require-empty` and `--auto-approve` to apply, `--stack` to status, `--force`
+to pull and `--yes` to link.
 
 API precedence: `--api-url`, `AIMOUNT_API_URL`, global configuration,
 `https://api.aimount.io`. Project precedence: `--project`, `AIMOUNT_PROJECT`,
@@ -78,6 +82,19 @@ root `.aimount/project.json`. Explicit `AIMOUNT_TOKEN` overrides the selected
 API's saved PAT without fallback. Empty or invalid explicit values fail. Every
 authenticated command gets fresh identity and relies on current API membership.
 Selecting an Organization does not replace a Project binding or grant authority.
+
+`resolve application <slug>` matches an exact primary slug or alias in the
+selected Project's Stack bindings. Text success prints only the Application ID
+and a newline; JSON success puts it in `.result.application_id`. A valid read
+without a match returns `application_not_found`; authorization, API, transport,
+malformed and ambiguous binding errors are not treated as misses.
+
+`status --stack` also reads the selected Project's Organization and Stack
+bindings. In JSON, `.result.project_organization_slug` identifies the Project's
+actual Organization, not the one selected by `switch`. `.result.stack_empty` is
+true only when there are no bindings of any kind, including aliases and Storage.
+Ordinary status does not perform these extra reads.
+
 API hostnames use IDNA ASCII canonicalization and numeric default-port removal,
 so equivalent Unicode/ASCII hosts and zero-padded ports select the same saved PAT.
 Use ordinary DNS/IDNA, dotted decimal IPv4 or bracketed IPv6. Percent-encoded
@@ -99,6 +116,52 @@ disable certificate validation. SIGINT/SIGTERM cancellation stops local token
 publication and attempts the cancellation endpoint once, for at most three
 seconds. Cancellation does not revoke a PAT already issued by the server. Lost
 token delivery is not retried or replaced automatically.
+
+## Application credentials
+
+`aimount auth login --application-credentials` requests additional Device Flow
+consent. Scoped login saves authorization without listing or selecting an
+Organization; use `switch` separately if needed. Plain login keeps its existing
+Organization selection. If a valid saved PAT lacks consent, scoped login only
+replaces it after the same account grants consent. If another command changes
+the saved authorization during consent, scoped login fails with `auth_changed`
+and leaves the newer state alone. `auth status --output json` reports the grant
+as `.result.identity.authentication.application_credentials: true`; absence
+means no grant. If `AIMOUNT_TOKEN` is set, supply an already opted-in PAT or
+unset it before starting Device Flow.
+
+```sh
+mkdir -m 700 ./local-secrets  # Keep this directory out of version control
+# Use the linked Project or pass --project explicitly.
+aimount runtime-keys create --application paperdesk --name backend --secret-file ./local-secrets/runtime
+
+aimount webhook-secrets create --application paperdesk --secret-file ./local-secrets/webhook
+
+aimount runtime-keys list --application paperdesk --output json
+aimount webhook-secrets list --application paperdesk --output json
+aimount runtime-keys revoke 0000000000000001 --application paperdesk
+aimount webhook-secrets revoke 0000000000000002 --application paperdesk
+```
+
+Each command resolves the explicit slug or alias in the selected Project.
+Automation can pass `--expect-application-id` to reject a changed binding. Create
+writes the exact one-time value, with no newline, to a new `0600` file in an
+existing user-owned directory that is not group/other writable. It never replaces
+an entry or prints the value. JSON create/revoke results expose `.result.id` and
+`.result.application_id`; list exposes `.result.items` and `.result.application_id`.
+
+If issuance or publication is uncertain, do not retry or use that destination,
+even if a file exists. Keep the adjacent `<secret-file>.pending` marker. After
+validating a create response, the CLI saves an owner-only `receipt.json` in the
+marker with only `id` and `application_id` before it publishes the value. If
+local publication does not complete, `credential_file_unconfirmed` reports
+those IDs in text and in JSON `.error.details`, even if receipt storage failed.
+`credential_create_unknown` means issuance could not be confirmed; it reports
+no credential ID. List metadata for the same Application and explicitly revoke
+an identified unusable credential by its exact ID. Only remove the marker and
+any unusable file after reconciliation. The marker can also contain a private
+staging file with the value. CLI does not create a replacement or revoke
+an existing credential automatically.
 
 ## Authored files
 
@@ -318,6 +381,14 @@ unsafe terminal control characters in data are escaped. Explicit `--output json`
 keeps the machine contract, including help/completion as success-envelope strings.
 The shell-internal `__complete` protocol stays raw regardless of `--output`; this
 exception is for generated completion scripts, not ordinary command automation.
+
+Use `apply --require-empty` for first provisioning. It refuses plans with any
+existing resource or binding (`stack_not_empty`, exit 2), and an empty plan is
+not a successful provisioning. It cannot be combined with `--prune`. Apply
+still sends the reviewed read set, so a concurrent Stack change can invalidate
+it. In interactive text mode the plan and prompt go to stderr. A successful
+Application creation appears on stdout as `  CREATE application <id>`; stdout
+can be captured without hiding the review.
 
 Apply retains one route/body/read-set/server-Date-derived `s1` key in process
 memory. Unknown outcomes offer only explicit identical retry after Retry-After

@@ -308,7 +308,8 @@ func (r *runner) run(o Options) (Result, error) {
 		return finish("auth logout", object{"api": api, "logged_out": true})
 	}
 	source := "saved PAT"
-	token := str(obj(auth["tokens"])[api])
+	savedToken := str(obj(auth["tokens"])[api])
+	token := savedToken
 	if explicitToken {
 		source = "AIMOUNT_TOKEN"
 		token = r.env["AIMOUNT_TOKEN"]
@@ -319,21 +320,29 @@ func (r *runner) run(o Options) (Result, error) {
 	client := newClient(api, token)
 	defer client.http.CloseIdleConnections()
 	var identity object
+	login := o.Command == "auth" && o.Args[0] == "login"
 	if token != "" {
 		identity, e = client.request(r.ctx, "GET", "/v0/auth/identity", "", "")
 		if e != nil {
 			a, ok := e.(*APIError)
-			if !(o.Command == "auth" && o.Args[0] == "login" && source == "saved PAT" && ok && a.Status == 401) {
+			if !(login && !explicitToken && ok && a.Status == 401) {
 				return result, e
 			}
 			token = ""
 		}
 	}
-	if o.Command == "auth" && o.Args[0] == "login" && token == "" {
+	if login && o.ApplicationCredentials && !hasApplicationCredentials(identity) && explicitToken {
+		return bad("application_credentials_required", "AIMOUNT_TOKEN lacks Application credential consent; unset it before running auth login --application-credentials")
+	}
+	if login && (token == "" || o.ApplicationCredentials && !hasApplicationCredentials(identity)) {
 		if o.NonInteractive {
+			if o.ApplicationCredentials {
+				return bad("interactive_login_required", "Run auth login --application-credentials interactively or supply an opted-in AIMOUNT_TOKEN")
+			}
 			return bad("interactive_login_required", "Run auth login interactively or supply AIMOUNT_TOKEN")
 		}
-		token, e = deviceLogin(r.ctx, api, r.errOut)
+		previousUser := str(obj(identity["principal"])["user_id"])
+		token, e = deviceLogin(r.ctx, api, r.errOut, o.ApplicationCredentials)
 		if e != nil {
 			return result, e
 		}
@@ -349,14 +358,26 @@ func (r *runner) run(o Options) (Result, error) {
 		if r.ctx.Err() != nil {
 			return result, commandError("cancelled", "Device login cancelled; no local publication", 3)
 		}
-		if e = updateAuthContext(r.ctx, authPath, api, token, false); e != nil {
+		if o.ApplicationCredentials {
+			if !hasApplicationCredentials(identity) {
+				return bad("application_credentials_required", "Device login did not grant Application credential consent; saved authorization was not replaced")
+			}
+			if previousUser != "" && previousUser != obj(identity["principal"])["user_id"] {
+				return bad("account_changed", "Device consent came from a different account; saved authorization was not replaced")
+			}
+			if e = updateAuthContext(r.ctx, authPath, api, token, false, &savedToken); e != nil {
+				return result, e
+			}
+			return finish("auth login", object{"api": api, "identity": identity, "authenticated": true})
+		}
+		if e = updateAuthContext(r.ctx, authPath, api, token, false, nil); e != nil {
 			return result, e
 		}
+		prior := obj(obj(config["contexts"])[api])
 		orgs, e := client.pages(r.ctx, "/v0/organizations")
 		if e != nil {
 			return result, e
 		}
-		prior := obj(obj(config["contexts"])[api])
 		var chosen object
 		if prior["user_id"] == obj(identity["principal"])["user_id"] {
 			for _, v := range orgs {
@@ -473,7 +494,7 @@ func (r *runner) run(o Options) (Result, error) {
 		projectID = str(chosen["id"])
 	}
 	if projectID == "" {
-		if o.Command == "status" {
+		if o.Command == "status" && !o.Stack {
 			return finish("status", object{"api": api, "identity": identity, "organization_id": nullable(organization), "saved_project": binding["project_id"], "project": nil})
 		}
 		return bad("project_required", "Use --project, AIMOUNT_PROJECT or link")
@@ -493,12 +514,62 @@ func (r *runner) run(o Options) (Result, error) {
 		projectSource = "--project/AIMOUNT_PROJECT"
 	}
 	target := object{"api": api, "project": project, "prune": o.Prune, "project_source": projectSource, "credential_source": source}
+	path := "/v0/projects/" + projectID + "/stack"
 	if o.Command == "status" {
 		v := maps.Clone(target)
 		v["identity"] = identity
 		v["organization_id"] = nullable(organization)
 		v["saved_project"] = binding["project_id"]
+		if o.Stack {
+			projectOrg := str(project["organization_id"])
+			if !idValid(projectOrg, "org") {
+				return result, &APIError{Status: 200, Code: "invalid_response"}
+			}
+			org, e := client.request(r.ctx, "GET", "/v0/organizations/"+projectOrg, "", "")
+			if e != nil {
+				return result, e
+			}
+			bindings, e := client.discoveryBindings(r.ctx, path+"/bindings")
+			if e != nil {
+				return result, e
+			}
+			v["project_organization_slug"] = org["slug"]
+			v["stack_empty"] = len(bindings) == 0
+		}
 		return finish("status", v)
+	}
+	if o.Command == "resolve" || o.Command == "runtime-keys" || o.Command == "webhook-secrets" {
+		slug := o.Application
+		if o.Command == "resolve" {
+			slug = o.Args[1]
+		} else if !hasApplicationCredentials(identity) {
+			return bad("application_credentials_required", "The selected PAT lacks Application credential consent; use auth login --application-credentials or an opted-in AIMOUNT_TOKEN")
+		}
+		bindings, e := client.discoveryBindings(r.ctx, path+"/bindings")
+		if e != nil {
+			return result, e
+		}
+		var application string
+		for _, binding := range bindings {
+			if binding["kind"] == "application" && binding["slug"] == slug {
+				application = str(binding["id"])
+				break
+			}
+		}
+		if application == "" {
+			return bad("application_not_found", "No Application has that slug or alias in the target Project")
+		}
+		if o.Command == "resolve" {
+			return finish("resolve application", object{"application_id": application})
+		}
+		if o.ExpectedApplicationID != "" && o.ExpectedApplicationID != application {
+			return result, commandError("application_changed", "The Application slug no longer resolves to the expected ID", 2)
+		}
+		v, e := manageApplicationCredentials(r.ctx, client, o, projectID, application)
+		if e != nil {
+			return result, e
+		}
+		return finish(o.Command+" "+o.Args[0], v)
 	}
 	if o.Command == "link" {
 		if binding["project_id"] != projectID {
@@ -537,7 +608,6 @@ func (r *runner) run(o Options) (Result, error) {
 		}
 		return finish("link", target)
 	}
-	path := "/v0/projects/" + projectID + "/stack"
 	if o.Command == "pull" {
 		var baseline object
 		files, e := replaceRoot(r.ctx, o.Root, func() (map[string]string, []string, error) {
@@ -611,6 +681,16 @@ func (r *runner) run(o Options) (Result, error) {
 	}
 	if o.Command != "apply" {
 		return bad("command_invalid", "Unsupported command")
+	}
+	if o.RequireEmpty {
+		readSet := obj(plan["read_set"])
+		// Credential conditions can represent new keys, not existing Stack state.
+		if len(list(readSet["resources"])) != 0 || len(list(readSet["bindings"])) != 0 {
+			return result, commandError("stack_not_empty", "Project already has Stack resources or bindings; apply was not sent", 2)
+		}
+		if len(list(plan["changes"])) == 0 {
+			return bad("stack_plan_empty", "The empty Project plan contains no changes; apply was not sent")
+		}
 	}
 	if o.Output == "text" {
 		fmt.Fprintf(r.errOut, "API: %s\nProject: %s (%s)\nWhole Project; prune=%t. Partial nonempty roots can remove remote resources.\n%s", textValue(api), textValue(str(project["id"])), textValue(str(project["name"])), o.Prune, semantic(plan))

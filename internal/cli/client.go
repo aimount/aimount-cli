@@ -25,7 +25,10 @@ type Options struct {
 	Args                                       []string
 	Root, API, Project, Organization, Output   string
 	NonInteractive, Prune, Force, Approve, Yes bool
-	Recover                                    bool
+	Recover, Stack, RequireEmpty               bool
+	ApplicationCredentials                     bool
+	Application, ExpectedApplicationID         string
+	SecretFile, CredentialName                 string
 }
 
 func normalizeAPI(value string) (string, error) {
@@ -207,6 +210,7 @@ func (c *Client) serverTime() (int64, error) {
 	return c.date.Add(time.Since(c.observed)).UnixMilli(), nil
 }
 func (c *Client) request(ctx context.Context, method, path, body, key string) (object, error) {
+	credential := credentialCollection(path)
 	mutation := method == "POST" && strings.HasSuffix(path, "/stack/apply")
 	bad := func(status int, code string) (object, error) {
 		return nil, &APIError{Status: status, Code: code, Unknown: mutation}
@@ -227,7 +231,18 @@ func (c *Client) request(ctx context.Context, method, path, body, key string) (o
 	if key != "" {
 		r.Header.Set("Idempotency-Key", key)
 	}
-	response, err := c.http.Do(r)
+	h := c.http
+	if credential != "" && method == "POST" {
+		// Use a fresh HTTP/1 connection: neither connection reuse nor protocol retries can replay issuance.
+		h = boundedHTTP()
+		t := h.Transport.(*http.Transport)
+		t.Protocols = new(http.Protocols)
+		t.Protocols.SetHTTP1(true)
+		t.DisableKeepAlives = true
+		r.GetBody = nil
+		defer h.CloseIdleConnections()
+	}
+	response, err := h.Do(r)
 	if err != nil {
 		return bad(0, "transport_unavailable")
 	}
@@ -257,7 +272,9 @@ func (c *Client) request(ctx context.Context, method, path, body, key string) (o
 	}
 	if s < 200 || s >= 300 {
 		code := str(obj(m["error"])["code"])
-		if !regexp.MustCompile(`^[a-z0-9_]{1,80}$`).MatchString(code) {
+		if credential != "" {
+			code = safeCredentialError(s, code)
+		} else if !regexp.MustCompile(`^[a-z0-9_]{1,80}$`).MatchString(code) {
 			code = "request_failed"
 		}
 		retry := 0.0
@@ -271,6 +288,18 @@ func (c *Client) request(ctx context.Context, method, path, body, key string) (o
 			}
 		}
 		return nil, &APIError{s, code, retry, mutation && (s >= 500 || code == "idempotency_in_progress")}
+	}
+	if credential != "" {
+		want := map[string]int{"GET": 200, "POST": 201, "DELETE": 204}[method]
+		if s != want {
+			return bad(s, "invalid_response")
+		}
+		if credential == "runtime-credentials" && method == "GET" {
+			cursor, present := m["next_cursor"]
+			if text, ok := cursor.(string); !present || cursor != nil && (!ok || text == "" || len(text) > 2048) {
+				return bad(s, "invalid_response")
+			}
+		}
 	}
 	if mutation {
 		rs, ok := m["resources"].([]any)
@@ -320,7 +349,10 @@ func (c *Client) request(ctx context.Context, method, path, body, key string) (o
 				}
 			}
 		}
-		return object{"principal": fields(p, "type", "user_id", "display_name"), "authentication": fields(a, "method", "expires_at", "pat_id")}, nil
+		if v, present := a[applicationCredentialsScope]; present && v != true {
+			return bad(s, "invalid_response")
+		}
+		return object{"principal": fields(p, "type", "user_id", "display_name"), "authentication": fields(a, "method", "expires_at", "pat_id", applicationCredentialsScope)}, nil
 	}
 	if method == "GET" && strings.HasSuffix(path, "/stack/bindings") {
 		bindings := projectBindings(m["bindings"], false)
@@ -481,6 +513,25 @@ func (c *Client) stack(ctx context.Context, projectID string) (graph, error) {
 		}
 	}
 	return g, nil
+}
+
+// Validate Application identities and uniqueness for discovery without tightening pull's legacy locator reads.
+func (c *Client) discoveryBindings(ctx context.Context, path string) ([]object, error) {
+	m, err := c.request(ctx, "GET", path, "", "")
+	if err != nil {
+		return nil, err
+	}
+	bindings := objects(m["bindings"])
+	seen := make(map[[2]string]bool, len(bindings))
+	for _, b := range bindings {
+		kind, slug := str(b["kind"]), str(b["slug"])
+		key := [2]string{kind, slug}
+		if seen[key] || kind == "application" && !idValid(str(b["id"]), "app") {
+			return nil, &APIError{Status: 200, Code: "invalid_response"}
+		}
+		seen[key] = true
+	}
+	return bindings, nil
 }
 
 var stackResourcePrefixes = map[string]string{"model": "mdl", "tool": "tol", "agent": "agt", "application": "app"}

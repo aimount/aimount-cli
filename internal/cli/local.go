@@ -140,9 +140,9 @@ func atomicJSONContext(ctx context.Context, path string, data any) error {
 	return nil
 }
 func updateAuth(path, api, token string, remove bool) error {
-	return updateAuthContext(context.Background(), path, api, token, remove)
+	return updateAuthContext(context.Background(), path, api, token, remove, nil)
 }
-func updateAuthContext(ctx context.Context, path, api, token string, remove bool) error {
+func updateAuthContext(ctx context.Context, path, api, token string, remove bool, expected *string) error {
 	if e := os.MkdirAll(filepath.Dir(path), 0700); e != nil {
 		return errors.New("cannot create auth directory")
 	}
@@ -156,6 +156,9 @@ func updateAuthContext(ctx context.Context, path, api, token string, remove bool
 		return e
 	}
 	tokens := obj(auth["tokens"])
+	if expected != nil && str(tokens[api]) != *expected {
+		return commandError("auth_changed", "Saved authorization changed during Device login; the new PAT was not saved", 2)
+	}
 	if remove {
 		delete(tokens, api)
 	} else {

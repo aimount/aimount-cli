@@ -212,7 +212,8 @@ func TestCancelledAuthCannotPublish(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if e := updateAuthContext(ctx, p, "https://a.example", "late", false); e == nil {
+	old := "old"
+	if e := updateAuthContext(ctx, p, "https://a.example", "late", false, &old); e == nil {
 		t.Fatal("cancelled publication accepted")
 	}
 	v, e := readState(p, "auth")

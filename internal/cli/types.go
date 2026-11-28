@@ -50,10 +50,13 @@ func (e *FileError) Error() string { return e.Diagnostic.File + ": " + e.Diagnos
 type CommandError struct {
 	Code, Message string
 	Exit          int
+	Details       object
 }
 
-func (e *CommandError) Error() string                   { return e.Message }
-func commandError(code, message string, exit int) error { return &CommandError{code, message, exit} }
+func (e *CommandError) Error() string { return e.Message }
+func commandError(code, message string, exit int) error {
+	return &CommandError{Code: code, Message: message, Exit: exit}
+}
 
 type fileErrors struct{ Errors []error }
 
